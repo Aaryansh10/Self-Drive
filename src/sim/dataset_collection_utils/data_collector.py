@@ -88,7 +88,7 @@ class DataCollector(Node):
 def main():
     parser = argparse.ArgumentParser(description="Collect training images from a camera topic.")
     parser.add_argument(
-        "--topic", default="/stereocamera/image_raw",
+        "--topic", default="/zed_node/monocamera/image_raw",
         help="Image topic to subscribe to (default: /camera/image_raw)",
     )
     parser.add_argument(
