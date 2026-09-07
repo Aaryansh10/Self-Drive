@@ -1,0 +1,24 @@
+<?xml version='1.0'?>
+<sdf version='1.4'>
+  <model name='sign_stop'>
+    <static>true</static>
+    <link name="sign">
+      <visual name="visual">
+            <geometry>
+                <mesh>
+                    <uri>model://sign_soup/materials/meshes/sign_soup.dae</uri>
+		    <scale>0.001 0.001 0.001</scale>
+                </mesh>
+            </geometry>
+        </visual>
+        <collision name="collision">
+            <geometry>
+                <mesh>
+                    <uri>model://sign_soup/materials/meshes/sign_soup.dae</uri>
+		    <scale>0.001 0.001 0.001</scale>
+                </mesh>
+            </geometry>
+        </collision>
+    </link>
+  </model>
+</sdf>

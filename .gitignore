@@ -1,0 +1,10 @@
+build/
+install/
+log/
+.vscode/
+__pycache__/
+*.ipynb_checkpoints/
+.env/
+*.onnx
+*.onnx.data
+*.engine

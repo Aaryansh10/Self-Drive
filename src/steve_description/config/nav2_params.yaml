@@ -1,0 +1,371 @@
+controller_server:
+  ros__parameters:
+    use_sim_time: true
+    controller_frequency: 25.0         
+    min_x_velocity_threshold: 0.001
+    min_y_velocity_threshold: 0.001    
+    min_theta_velocity_threshold: 0.001
+    failure_tolerance: 0.3             
+    progress_checker_plugin: "progress_checker"
+    goal_checker_plugins: ["goal_checker"]
+    controller_plugins: ["FollowPath"]
+ 
+    # Progress checker — detect stall
+    progress_checker:
+      plugin: "nav2_controller::SimpleProgressChecker"
+      required_movement_radius: 0.1    
+      movement_time_allowance: 6.0     
+                                        
+    goal_checker:
+      plugin: "nav2_controller::SimpleGoalChecker"
+      xy_goal_tolerance: 0.2          
+      yaw_goal_tolerance: 0.1        
+      stateful: true
+ 
+    FollowPath:
+      plugin: "nav2_mppi_controller::MPPIController"
+ 
+      # --- Prediction horizon ---
+      time_steps: 30                   # number of prediction steps
+      model_dt: 0.1                   
+      batch_size: 2000     
+      prune_distance: 7.5          
+                                        
+      ax_max: 2.6                      # max linear acceleration (m/s²)
+      ax_min: -3.0                     # max linear deceleration (m/s²)
+      ay_max: 0.0                      # lateral accel — 0 for Ackermann
+      az_max: 3.0                     # max angular acceleration (rad/s²)
+ 
+      # --- Control limits ---
+      vx_max: 2.2                      # max forward speed (m/s)
+      vx_min: -0.5                    # max reverse speed (m/s)
+      vy_max: 0.0                      # Ackermann: no lateral motion
+      wz_max: 1.5                      # max yaw rate (rad/s) — fast 4WS
+ 
+      # --- Sampling noise (std deviations of control perturbations) ---
+      vx_std: 0.7
+      vy_std: 0.0                      # CRITICAL: 0.0 enforces Ackermann constraint
+      wz_std: 0.9
+ 
+      # --- MPPI algorithm parameters ---
+      iteration_count: 1               # optimisation iterations per cycle
+      temperature: 0.3                
+      gamma: 0.015                     # regularisation coefficient
+
+      regenerate_noises: false
+      sgf_order: 2
+
+      # --- Trajectory visualisation ---
+      visualize: false
+      TrajectoryVisualizer:
+        trajectory_step: 5
+        time_step: 3
+
+      TrajectoryValidator:
+        plugin: "mppi::DefaultOptimalTrajectoryValidator"
+        collision_lookahead_time: 2.0
+        consider_footprint: false
+
+      # --- Motion model ---
+      motion_model: "Ackermann"
+      AckermannConstraints:
+        min_turning_r: 0.50
+        
+      # --- Cost function critics ---
+      critics: [
+        "ConstraintCritic",
+        "GoalCritic",
+        "GoalAngleCritic",
+        "PathAlignCritic",
+        "PathFollowCritic",
+        "PathAngleCritic",
+        "ObstaclesCritic",
+        "PreferForwardCritic"
+      ]
+ 
+      ConstraintCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 4.0
+ 
+      GoalCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 1.0
+        threshold_to_consider: 1.40    
+ 
+      GoalAngleCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 1.0
+        threshold_to_consider: 0.40   
+ 
+      PathAlignCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 0.5            
+        max_path_occupancy_ratio: 0.05
+        trajectory_point_step: 3
+        threshold_to_consider: 0.40
+        offset_from_furthest: 4
+        use_path_orientations: true
+ 
+      PathFollowCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 2.0
+        offset_from_furthest: 5
+        threshold_to_consider: 1.40
+ 
+      PathAngleCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 1.0
+        offset_from_furthest: 3
+        threshold_to_consider: 0.40
+        max_angle_to_furthest: 1.0    
+        forward_preference: true      
+        mode: 0
+ 
+      ObstaclesCritic:
+        enabled: true
+        cost_power: 1
+        repulsion_weight: 5.0
+        critical_weight: 50.0        
+                                     
+        consider_footprint: true      
+        collision_cost: 10000.0
+        collision_margin_distance: 0.0  
+        near_goal_distance: 0.50
+        inflation_radius: 0.4         
+        cost_scaling_factor: 40.0
+
+      PreferForwardCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 2.0
+        threshold_to_consider: 0.40
+
+behavior_server:
+  ros__parameters:
+    use_sim_time: true
+    costmap_topic: local_costmap/costmap_raw
+    footprint_topic: local_costmap/published_footprint
+    cycle_frequency: 10.0
+    global_frame: odom
+    robot_base_frame: link_base
+    transform_tolerance: 1.0
+
+    behavior_plugins:
+      - "backup"
+      - "wait"
+      - "spin"
+
+    backup:
+      plugin: "nav2_behaviors/BackUp"
+  
+    wait:
+      plugin: "nav2_behaviors/Wait"
+
+    spin:                
+      plugin: "nav2_behaviors/Spin"
+
+
+local_costmap:
+  local_costmap:
+    ros__parameters:
+      use_sim_time: true
+
+      global_frame: odom
+      robot_base_frame: link_base
+      rolling_window: true             
+
+      update_frequency: 25.0
+      publish_frequency: 5.0
+
+      width: 14                       
+      height: 14
+      resolution: 0.05
+
+      robot_radius: 0.0
+      footprint: "[ [0.50, 0.48], [0.50, -0.48], [-0.50, -0.48], [-0.50, 0.48] ]"
+      footprint_padding: 0.0
+ 
+      transform_tolerance: 0.3
+
+      plugins:
+      - "plugin_container_obstacles"   # barrels (lidar) + potholes (vision)
+      - "plugin_container_lanes"       # lane boundary (vision)
+
+      plugin_container_obstacles:
+        plugin: "nav2_costmap_2d::PluginContainerLayer"
+        enabled: true
+        combination_method: 1            # Max
+        plugins: ["barrels_layer", "pothole_container", "inflation_layer"]
+
+        barrels_layer:                     
+          plugin: "nav2_costmap_2d::ObstacleLayer"
+          enabled: true
+          observation_sources: obstacle_detector obstacle_clearer
+
+          obstacle_detector:
+            topic: /obstacle_cloud
+            data_type: PointCloud2
+            sensor_frame: "link_lidar"
+            marking: true
+            clearing: false
+            max_obstacle_height: 2.0
+            min_obstacle_height: 0.15
+            obstacle_max_range: 7.0      
+            obstacle_min_range: 0.0
+            raytrace_max_range: 0.0
+            raytrace_min_range: 0.0
+            
+          obstacle_clearer:
+            topic: /clearing_cloud
+            data_type: PointCloud2
+            sensor_frame: "link_lidar"
+            marking: false
+            clearing: true
+            max_obstacle_height: 2.0
+            min_obstacle_height: -0.1
+            obstacle_max_range: 15.0
+            obstacle_min_range: 0.0
+            raytrace_max_range: 15.0
+            raytrace_min_range: 0.0
+            
+        pothole_container:
+          plugin: "nav2_costmap_2d::PluginContainerLayer"
+          enabled: true
+          combination_method: 1
+          plugins: ["pothole_layer", "pothole_denoise"]
+
+          pothole_layer:
+            plugin: "nav2_costmap_2d::ObstacleLayer"
+            enabled: true
+            observation_sources: pothole_detector pothole_clearer lidar_clearer
+            
+            pothole_detector:
+              topic: /pothole_pc
+              data_type: "PointCloud2"
+              sensor_frame: "link_base"
+              marking: true
+              clearing: false
+              min_obstacle_height: -0.5
+              max_obstacle_height: 0.5
+              obstacle_max_range: 7.0
+              raytrace_max_range: 0.0
+
+            pothole_clearer:
+              topic: /vision_clear_pc
+              data_type: "PointCloud2"
+              sensor_frame: "link_base"
+              marking: false
+              clearing: true
+              min_obstacle_height: -0.5
+              max_obstacle_height: 0.5
+              obstacle_max_range: 15.0
+              raytrace_max_range: 15.0
+            
+            lidar_clearer:
+              topic: /clearing_cloud
+              data_type: "PointCloud2"
+              sensor_frame: "link_lidar"
+              marking: false
+              clearing: true
+              min_obstacle_height: -0.5     
+              max_obstacle_height: 0.5
+              obstacle_max_range: 15.0
+              raytrace_max_range: 15.0
+
+          pothole_denoise:
+            plugin: "nav2_costmap_2d::DenoiseLayer"
+            enabled: true
+            minimal_group_size: 2
+            group_connectivity_type: 8
+
+        inflation_layer:
+          plugin: "nav2_costmap_2d::InflationLayer"
+          inflation_radius: 0.4
+          cost_scaling_factor: 40.0
+
+      plugin_container_lanes:
+        plugin: "nav2_costmap_2d::PluginContainerLayer"
+        enabled: true
+        combination_method: 1
+        plugins: ["lane_layer", "denoise_layer", "inflation_layer"]
+
+        lane_layer:
+          plugin: "nav2_costmap_2d::ObstacleLayer"
+          enabled: true
+          observation_sources: lane_detector lane_clearer lidar_clearer
+
+          lane_detector:
+            topic: /lane_pc
+            data_type: "PointCloud2"
+            sensor_frame: "link_base"
+            marking: true
+            clearing: false
+            min_obstacle_height: -0.5
+            max_obstacle_height: 0.5
+            obstacle_max_range: 7.0
+            raytrace_max_range: 0.0
+
+          lane_clearer:
+            topic: /vision_clear_pc
+            data_type: "PointCloud2"
+            sensor_frame: "link_base"
+            marking: false
+            clearing: true
+            min_obstacle_height: -0.5
+            max_obstacle_height: 0.5
+            obstacle_max_range: 15.0
+            raytrace_max_range: 15.0
+
+          lidar_clearer:
+            topic: /clearing_cloud
+            data_type: "PointCloud2"
+            sensor_frame: "link_lidar"
+            marking: false
+            clearing: true
+            min_obstacle_height: -0.5     # match pothole_layer's own height filter, not LiDAR's
+            max_obstacle_height: 0.5
+            obstacle_max_range: 15.0
+            raytrace_max_range: 15.0
+
+        denoise_layer:
+          plugin: "nav2_costmap_2d::DenoiseLayer"
+          enabled: true
+          minimal_group_size: 3        
+          group_connectivity_type: 8
+
+        inflation_layer:
+          plugin: "nav2_costmap_2d::InflationLayer"
+          inflation_radius: 0.1        # just enough for ObstaclesCritic to feel it — not enough to close narrow corridors
+          cost_scaling_factor: 15.0
+
+
+velocity_smoother:
+  ros__parameters:
+    use_sim_time: true
+    smoothing_frequency: 25.0
+    scale_velocities: false
+    feedback: "OPEN_LOOP"
+    max_velocity: [2.2, 0.0, 2.4]     # [vx, vy, wz] 
+    min_velocity: [-0.5, 0.0, -2.4]
+    max_accel: [3.0, 0.0, 3.5]
+    max_decel: [-3.0, 0.0, -3.5]
+    odom_topic: "odometry/local"
+    odom_duration: 0.1
+    deadband_velocity: [0.0, 0.0, 0.0]
+    velocity_timeout: 1.0
+
+lifecycle_manager_navigation:
+  ros__parameters:
+    use_sim_time: true
+    autostart: true
+    bond_timeout: 4.0
+    node_names:
+      - "controller_server"
+      - "behavior_server"
+      - "velocity_smoother"
