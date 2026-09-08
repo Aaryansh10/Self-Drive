@@ -1,58 +1,61 @@
+# Consumes /odom/with_covariance and /imu/with_covariance from sensor_repub.py.
+
 ekf_filter_node:
   ros__parameters:
     frequency: 30.0
     sensor_timeout: 0.5
     transform_timeout: 0.1
-    two_d_mode: true
+    two_d_mode: false
     publish_tf: true
-    publish_odom_topic: true
     use_sim_time: true
-    
+    print_diagnostics: true
+
     map_frame: map
-    world_frame: odom
-    base_link_frame: link_base
     odom_frame: odom
-    
+    base_link_frame: link_base
+    world_frame: odom
+
+    # --- Wheel odometry (rotated to true body-frame vx/vy by sensor_repub.py) ---
     odom0: /odom/with_covariance
-    odom0_config: [false, false, false,     
-                   false, false, false,     
-                   true, false, false,     
-                   false, false, true,   
-                   false, false, false] 
-    odom0_differential: false  
-    
+    odom0_config: [false, false, false,
+                   false, false, false,
+                   true,  false, false,
+                   false, false, true,
+                   false, false, false]
+    odom0_differential: false
+    odom0_relative: false
+
+    # Static override: locks y/z position, y/z linear vel, roll/pitch vel to
+    # effectively-infinite variance since a ground vehicle can't move there.
+    odom0_pose_covariance: [0.1, 0.0, 0.0, 0.0, 0.0, 0.0,
+                             0.0, 0.1, 0.0, 0.0, 0.0, 0.0,
+                             0.0, 0.0, 1000000000.0, 0.0, 0.0, 0.0,
+                             0.0, 0.0, 0.0, 1000000000.0, 0.0, 0.0,
+                             0.0, 0.0, 0.0, 0.0, 1000000000.0, 0.0,
+                             0.0, 0.0, 0.0, 0.0, 0.0, 0.1]
+
+    odom0_twist_covariance: [0.1, 0.0, 0.0, 0.0, 0.0, 0.0,
+                              0.0, 0.1, 0.0, 0.0, 0.0, 0.0,
+                              0.0, 0.0, 1000000000.0, 0.0, 0.0, 0.0,
+                              0.0, 0.0, 0.0, 1000000000.0, 0.0, 0.0,
+                              0.0, 0.0, 0.0, 0.0, 1000000000.0, 0.0,
+                              0.0, 0.0, 0.0, 0.0, 0.0, 0.1]
+
+    # --- IMU: yaw orientation + yaw rate only ---
     imu0: /imu/with_covariance
-    imu0_config: [false, false, false,    
-                  false, false, true,     
-                  false, false, false,    
-                  false, false, true,  
+    imu0_config: [false, false, false,
+                  true, true, true,
+                  false, false, false,
+                  true, true, true,
                   false, false, false]
     imu0_differential: false
+    imu0_relative: false
     imu0_remove_gravitational_acceleration: true
 
-    odom0_pose_covariance: [0.1, 0.0, 0.0, 0.0, 0.0, 0.0,
-                           0.0, 0.1, 0.0, 0.0, 0.0, 0.0,
-                           0.0, 0.0, 1000000000.0, 0.0, 0.0, 0.0,
-                           0.0, 0.0, 0.0, 1000000000.0, 0.0, 0.0,
-                           0.0, 0.0, 0.0, 0.0, 1000000000.0, 0.0,
-                           0.0, 0.0, 0.0, 0.0, 0.0, 0.1]
-    
-    odom0_twist_covariance: [0.1, 0.0, 0.0, 0.0, 0.0, 0.0,
-                            0.0, 0.1, 0.0, 0.0, 0.0, 0.0,
-                            0.0, 0.0, 1000000000.0, 0.0, 0.0, 0.0,
-                            0.0, 0.0, 0.0, 1000000000.0, 0.0, 0.0,
-                            0.0, 0.0, 0.0, 0.0, 1000000000.0, 0.0,
-                            0.0, 0.0, 0.0, 0.0, 0.0, 0.1]
-    
-    imu0_angular_velocity_covariance: [1000000000.0, 0.0, 0.0,
-                                      0.0, 0.05, 0.0,
-                                      0.0, 0.0, 0.05]
-    
+    imu0_angular_velocity_covariance: [0.05, 0.0, 0.0,
+                                        0.0, 0.05, 0.0,
+                                        0.0, 0.0, 0.05]
+
     imu0_linear_acceleration_covariance: [0.05, 0.0, 0.0,
-                                         0.0, 1000000000.0, 0.0,
-                                         0.0, 0.0, 0.05]
-    
-    odom0_frame_id: odom
-    imu0_frame_id: link_imu
-    
-    print_diagnostics: true
+                                           0.0, 1000000000.0, 0.0,
+                                           0.0, 0.0, 0.05]
