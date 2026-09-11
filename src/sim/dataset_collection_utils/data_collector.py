@@ -10,7 +10,7 @@ and restart the script across multiple sessions without overwriting or
 restarting from zero.
 
 Usage:
-    python3 collect_data.py --topic /camera/image_raw --outdir ./dataset
+    python3 data_collector.py --topic /camera/image_raw --outdir ./dataset
 
 Controls (with the preview window focused):
     p   -> save current frame

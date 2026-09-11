@@ -31,13 +31,13 @@ class SensorCovarianceRepublisher(Node):
         
         # 9-value matrices for the IMU
         self.imu_orientation_cov = [
-            0.05, 0.0, 0.0,
+            0.3, 0.0, 0.0,
             0.0, 0.05, 0.0,
             0.0, 0.0, 0.05
         ]
         
         self.imu_angular_vel_cov = [
-            0.05, 0.0, 0.0,
+            0.3, 0.0, 0.0,
             0.0, 0.05, 0.0,
             0.0, 0.0, 0.05
         ]
