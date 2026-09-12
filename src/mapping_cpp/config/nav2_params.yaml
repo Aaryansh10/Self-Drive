@@ -1,0 +1,147 @@
+controller_server:
+  ros__parameters:
+    use_sim_time: true
+    controller_frequency: 20.0
+    progress_checker_plugin: "progress_checker"
+    goal_checker_plugins: ["goal_checker"]
+    controller_plugins: ["FollowPath"]
+
+    progress_checker:
+      plugin: "nav2_controller::SimpleProgressChecker"  
+                                        
+    goal_checker:
+      plugin: "nav2_controller::SimpleGoalChecker"
+ 
+    FollowPath:
+      plugin: "nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController"
+
+local_costmap:
+  local_costmap:
+    ros__parameters:
+      use_sim_time: true
+
+      global_frame: odom
+      robot_base_frame: link_base
+      rolling_window: true             
+
+      update_frequency: 20.0
+      publish_frequency: 5.0
+
+      width: 20                       
+      height: 20
+      resolution: 0.1
+
+      robot_radius: 0.0
+      footprint: "[ [0.50, 0.48], [0.50, -0.48], [-0.50, -0.48], [-0.50, 0.48] ]"
+      footprint_padding: 0.0
+ 
+      transform_tolerance: 0.3
+
+      plugins:
+      - "plugin_physical_obstacles"   # barrels + tyres + pedestrians (lidar) + potholes (vision)
+      - "plugin_container_lanes"       # lane boundary (vision)
+
+      plugin_physical_obstacles:
+        plugin: "nav2_costmap_2d::PluginContainerLayer"
+        enabled: true
+        combination_method: 1            # Max
+        plugins: ["obstacle_layer", "inflation_layer"]
+
+        obstacle_layer:                     
+          plugin: "nav2_costmap_2d::ObstacleLayer"
+          enabled: true
+          observation_sources: obstacle_detector obstacle_clearer
+
+          obstacle_detector:
+            topic: /obstacle_cloud
+            data_type: PointCloud2
+            sensor_frame: "link_lidar"
+            marking: true
+            clearing: false
+            max_obstacle_height: 2.5
+            min_obstacle_height: 0.0
+            obstacle_max_range: 10.0      
+            obstacle_min_range: 0.0
+            raytrace_max_range: 0.0
+            raytrace_min_range: 0.0
+            
+          obstacle_clearer:
+            topic: /clearing_cloud
+            data_type: PointCloud2
+            sensor_frame: "link_lidar"
+            marking: false
+            clearing: true
+            max_obstacle_height: 2.5
+            min_obstacle_height: -0.1
+            obstacle_max_range: 10.0
+            obstacle_min_range: 0.0
+            raytrace_max_range: 15.0
+            raytrace_min_range: 0.0
+            
+        inflation_layer:
+          plugin: "nav2_costmap_2d::InflationLayer"
+          inflation_radius: 0.4
+          cost_scaling_factor: 40.0
+
+      plugin_container_lanes:
+        plugin: "nav2_costmap_2d::PluginContainerLayer"
+        enabled: true
+        combination_method: 1
+        plugins: ["lane_layer", "denoise_layer", "inflation_layer"]
+
+        lane_layer:
+          plugin: "nav2_costmap_2d::ObstacleLayer"
+          enabled: true
+          observation_sources: lane_detector lane_clearer lidar_clearer
+
+          lane_detector:
+            topic: /lane_pc
+            data_type: "PointCloud2"
+            sensor_frame: "link_base"
+            marking: true
+            clearing: false
+            min_obstacle_height: -0.5
+            max_obstacle_height: 0.5
+            obstacle_max_range: 10.0
+            raytrace_max_range: 0.0
+
+          lane_clearer:
+            topic: /vision_clear_pc
+            data_type: "PointCloud2"
+            sensor_frame: "link_base"
+            marking: false
+            clearing: true
+            min_obstacle_height: -0.5
+            max_obstacle_height: 0.5
+            obstacle_max_range: 15.0
+            raytrace_max_range: 15.0
+
+          lidar_clearer:
+            topic: /clearing_cloud
+            data_type: "PointCloud2"
+            sensor_frame: "link_lidar"
+            marking: false
+            clearing: true
+            min_obstacle_height: -0.5     # match pothole_layer's own height filter, not LiDAR's
+            max_obstacle_height: 0.5
+            obstacle_max_range: 15.0
+            raytrace_max_range: 15.0
+
+        denoise_layer:
+          plugin: "nav2_costmap_2d::DenoiseLayer"
+          enabled: true
+          minimal_group_size: 3        
+          group_connectivity_type: 8
+
+        inflation_layer:
+          plugin: "nav2_costmap_2d::InflationLayer"
+          inflation_radius: 0.1        # just enough for ObstaclesCritic to feel it — not enough to close narrow corridors
+          cost_scaling_factor: 15.0
+
+lifecycle_manager_navigation:
+  ros__parameters:
+    use_sim_time: true
+    autostart: true
+    bond_timeout: 4.0
+    node_names:
+      - "controller_server"

@@ -277,12 +277,12 @@
     </gazebo> -->
     <gazebo>
         <plugin name="ackermann_drive" filename="libackerman_drive_plugin.so">
-            <updateRate>20</updateRate>
+            <updateRate>30</updateRate>
             <commandTopic>cmd_vel</commandTopic>
             <odometryTopic>odom</odometryTopic>
             <odometryFrame>odom</odometryFrame>
             <robotBaseFrame>link_base</robotBaseFrame>
-            <publish_odom_tf>false</publish_odom_tf>
+            <publish_odom_tf>true</publish_odom_tf>
             <!-- Robot Dim -->
             <wheelRadius>0.127</wheelRadius>
             <wheelSeperation>0.914</wheelSeperation>

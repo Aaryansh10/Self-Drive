@@ -42,4 +42,12 @@ def generate_launch_description():
             output='screen',
             parameters=[{'use_sim_time': True}] 
         ),
+
+        Node(
+            package='sim_utils_py',
+            executable='odom_to_tf',
+            name='odom_to_tf',
+            output='screen',
+            parameters=[{'use_sim_time': True}]
+        ),
     ])
