@@ -1,6 +1,6 @@
-# Chappie (Documentation)
+# Self-Drive (Documentation)
 
-## How to run:
+## How to run *sim*:
 * `cd Self-Drive`
 * `colcon build --cmake-args -DCMAKE_BUILD_TYPE=Release`
 * `source install/setup.bash`
