@@ -84,11 +84,11 @@ class CSPBlock(nn.Module):
 
 class DownsampleCSP(nn.Module):
  
-    def __init__(self, in_channels, out_channels, n=1):
+    def __init__(self, in_channels, out_channels, n_blocks=1):
         super().__init__()
 
         self.downsample = ConvBNSiLU(in_channels, out_channels, k_size=3, stride=2)
-        self.csp = CSPBlock(out_channels, out_channels, n_blocks=n)
+        self.csp = CSPBlock(out_channels, out_channels, n_blocks=n_blocks)
         self.eca = ECABlock(out_channels)
  
     def forward(self, x):
