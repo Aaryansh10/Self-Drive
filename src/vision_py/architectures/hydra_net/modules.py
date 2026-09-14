@@ -55,8 +55,8 @@ class Bottleneck(nn.Module):
         super().__init__()
 
         intermediate_channels = int(in_channels * expansion)
-        self.conv1 = nn.Conv2d(in_channels, intermediate_channels, kernel_size=3)
-        self.conv2 = nn.Conv2d(intermediate_channels, in_channels, kernel_size=3)
+        self.conv1 = ConvBNSiLU(in_channels, intermediate_channels, k_size=3)
+        self.conv2 = ConvBNSiLU(intermediate_channels, in_channels, k_size=3)
         self.skip_connection = skip_connection
 
     def forward(self, x):
@@ -73,14 +73,14 @@ class CSPBlock(nn.Module):
         self.blocks = nn.ModuleList(
             Bottleneck(intermediate_channels, skip_connection) for _ in range(n_blocks)
         )
-        self.cv2 = ConvBNSiLU((2 + n_blocks) * intermediate_channels, out_channels, k_size=1)
+        self.conv2 = ConvBNSiLU((2 + n_blocks) * intermediate_channels, out_channels, k_size=1)
 
     def forward(self, x):
         y = list(self.conv1(x).chunk(2, dim=1))
         for block in self.blocks:
             y.append(block(y[-1]))
             
-        return self.cv2(torch.cat(y, dim=1))
+        return self.conv2(torch.cat(y, dim=1))
 
 class DownsampleCSP(nn.Module):
  

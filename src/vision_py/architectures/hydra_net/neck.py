@@ -41,7 +41,7 @@ class Neck(nn.Module):
         p3_lat = self.lat_c3(c3)
  
         # top-down (FPN)
-        p4_td = self.fuse_p4_td([p4_lat, self._upsample_to(p5, p4_lat)])
+        p4_td = self.fuse_p4_topdown([p4_lat, self._upsample_to(p5, p4_lat)])
         p3_out = self.fuse_p3_out([p3_lat, self._upsample_to(p4_td, p3_lat)])
  
         # bottom-up (PANet)

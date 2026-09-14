@@ -15,7 +15,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torchvision.ops import roi_align
 
-from .modules import ConvBNAct
+from .modules import ConvBNSiLU
 from .utils import generate_grid_points, decode_ltrb
 
 class SegmentationHead(nn.Module):
@@ -25,17 +25,17 @@ class SegmentationHead(nn.Module):
     in a per-pixel classification map (lane lines / stop lines / background).
     """
 
-    def __init__(self, in_ch, num_classes=3, mid_ch=64):
+    def __init__(self, in_ch, num_classes=4, mid_ch=64):
         super().__init__()
 
         # stride 8 -> stride 4
-        self.conv1 = ConvBNAct(in_ch, mid_ch, k=3)
+        self.conv1 = ConvBNSiLU(in_ch, mid_ch, k_size=3)
 
         # stride 4 -> stride 2
-        self.conv2 = ConvBNAct(mid_ch, mid_ch, k=3)
+        self.conv2 = ConvBNSiLU(mid_ch, mid_ch, k_size=3)
 
         # stride 2 -> stride 1
-        self.conv3 = ConvBNAct(mid_ch, mid_ch // 2, k=3)
+        self.conv3 = ConvBNSiLU(mid_ch, mid_ch // 2, k_size=3)
 
         self.classifier = nn.Conv2d(mid_ch // 2, num_classes, kernel_size=1)
 
@@ -89,10 +89,10 @@ class DetectionHead(nn.Module):
         self.strides = strides
 
         self.cls_tower = nn.Sequential(
-            *[ConvBNAct(in_ch if i == 0 else mid_ch, mid_ch, k=3) for i in range(num_convs)]
+            *[ConvBNSiLU(in_ch if i == 0 else mid_ch, mid_ch, k_size=3) for i in range(num_convs)]
         )
         self.reg_tower = nn.Sequential(
-            *[ConvBNAct(in_ch if i == 0 else mid_ch, mid_ch, k=3) for i in range(num_convs)]
+            *[ConvBNSiLU(in_ch if i == 0 else mid_ch, mid_ch, k_size=3) for i in range(num_convs)]
         )
 
         self.cls_pred = nn.Conv2d(mid_ch, num_classes, kernel_size=1)
@@ -159,8 +159,8 @@ class SignAuthenticityHead(nn.Module):
         super().__init__()
         self.roi_size = roi_size
         self.feat_stride = feat_stride  # which neck level (by stride) to pool from
-        self.conv1 = ConvBNAct(in_ch, mid_ch, k=3)
-        self.conv2 = ConvBNAct(mid_ch, mid_ch, k=3)
+        self.conv1 = ConvBNSiLU(in_ch, mid_ch, k_size=3)
+        self.conv2 = ConvBNSiLU(mid_ch, mid_ch, k_size=3)
         self.gap = nn.AdaptiveAvgPool2d(1)
         self.fc = nn.Linear(mid_ch, num_classes)
 
