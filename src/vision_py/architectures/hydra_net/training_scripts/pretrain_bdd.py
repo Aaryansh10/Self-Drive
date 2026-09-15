@@ -9,7 +9,7 @@ import time
 import torch
 from torch.utils.data import DataLoader
 
-from hydra_net.model import HydraNet
+from vision_py.architectures.hydra_net.model_small import HydraNet
 from training_scripts.bdd_dataset_loader import BDDDataset, bdd_collate_fn, BDD_DET_CLASSES
 from training_scripts.target_assigner import build_strides_per_point, assign_targets_batch
 from training_scripts.pretrain_losses import sigmoid_focal_loss, giou_loss, MultiTaskLoss

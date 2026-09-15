@@ -63,3 +63,42 @@ class HydraNet(nn.Module):
             "sign_head": sum(p.numel() for p in self.sign_head.parameters()),
             "total": sum(p.numel() for p in self.parameters()),
         }
+
+
+# ---------------------------------------------------------------------------
+# Named architecture variants that share the same channel widths (so any
+# difference in results is attributable to depth, not capacity-via-width)
+# but differ in backbone depth. Useful for a "does more depth help, at equal
+# width, on BDD100K?" ablation.
+# ---------------------------------------------------------------------------
+MODEL_VARIANTS = {
+    # The original backbone: depths=(1, 2, 3, 1) CSP bottlenecks per stage.
+    "base": dict(
+        backbone_widths=(32, 64, 128, 256, 512),
+        backbone_depths=(1, 2, 3, 1),
+    ),
+    # Same widths, ~2x the CSP bottleneck blocks per stage, so parameter/FLOP
+    # growth comes purely from depth rather than channel capacity.
+    "deep": dict(
+        backbone_widths=(32, 64, 128, 256, 512),
+        backbone_depths=(2, 4, 6, 2),
+    ),
+}
+
+
+def build_hydranet(variant="base", **overrides):
+    """
+    Construct a HydraNet from one of the named MODEL_VARIANTS above. Any
+    HydraNet kwarg not related to width/depth (num_seg_classes, num_obj_classes,
+    input_size, sign_roi_stride, neck_ch, ...) can be passed as an override.
+
+    Examples
+    --------
+    build_hydranet("base", num_obj_classes=10)
+    build_hydranet("deep", input_size=(544, 960), num_obj_classes=10)
+    """
+    if variant not in MODEL_VARIANTS:
+        raise ValueError(f"Unknown model variant '{variant}'. Choices: {list(MODEL_VARIANTS)}")
+    kwargs = dict(MODEL_VARIANTS[variant])
+    kwargs.update(overrides)
+    return HydraNet(**kwargs)
