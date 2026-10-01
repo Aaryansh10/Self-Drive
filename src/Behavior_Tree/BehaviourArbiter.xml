@@ -1,0 +1,50 @@
+<root main_tree_to_execute="MainTree" BTCPP_format="4">
+    <BehaviorTree ID="MainTree">
+
+        <RecoveryNode number_of_retries="1" name="RootRecovery">
+
+            <ReactiveFallback name="BehaviourArbiter">
+
+                <Sequence name="STOP">
+                    <StopConditionMet/>
+                    <StopAtDistance/>
+                </Sequence>
+
+                <Sequence name="INTERSECTION">
+                    <IntersectionDetected/>
+                    <Sequence name="INTERSECTION_PLAN_AND_FOLLOW">
+                        <ComputeIntersectionPath path="{path}"/>
+                        <FollowPath path="{path}" controller_id=""/>
+                    </Sequence>
+                </Sequence>
+
+                <Sequence name="OBSTACLE_AVOIDANCE">
+                    <ObstacleDetected/>
+                    <Sequence name="LANE_CHANGE">
+                        <ComputeLaneChange path="{path}"/>
+                        <FollowPath path="{path}" controller_id=""/>
+                    </Sequence>
+                </Sequence>
+
+                <Sequence name="PARKING">
+                    <ParkingSlotDetected/>
+                    <Sequence name="PARKING_PLAN_AND_FOLLOW">
+                        <ComputeObstaclePath path="{path}"/>
+                        <FollowPath path="{path}" controller_id=""/>
+                    </Sequence>
+                </Sequence>
+
+                <Sequence name="FOLLOW_PATH">
+                    <ComputePathtoPose goal="{goal}" path="{path}"/>
+                    <FollowPath path="{path}" controller_id=""/>
+                </Sequence>
+
+            </ReactiveFallback>
+
+            <Sequence name="Recovery">
+            </Sequence>
+
+        </RecoveryNode>
+
+    </BehaviorTree>
+</root>
