@@ -17,29 +17,23 @@ def clean_mask(mask, kernel, is_white):
     close = cv2.morphologyEx(open, cv2.MORPH_CLOSE, kernel)
 
     contours, _ = cv2.findContours(close, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    print(len(contours))
     for contour in contours:
         area = cv2.contourArea(contour)
         if area < MIN_AREA:
-            print("Blob is too small")
             continue
 
         perimeter = cv2.arcLength(contour, True)
         if perimeter == 0:
-            print("Blob doesnt have a perimeter")
             continue
 
         circularity = ((4 * np.pi * area) / (perimeter * perimeter))
         if circularity >= MAX_CIRCULARITY_WHITE and is_white:
-            print("Blob is too circular")
             continue
 
         if circularity >= MAX_CIRCULARITY_YELLOW and not is_white:
-            print("Blob is too circular")
             continue
         
-        cv2.drawContours(mask_clean, [contour], 0, 255, -1)
-        print("Found blob")
+        cv2.drawContours(mask_clean, [contour], 0, 1, -1)
 
     return mask_clean
 
@@ -57,7 +51,7 @@ def extract_stopline(mask):
         if aspect_ratio < MIN_ASPECT_RATIO:
             continue
 
-        cv2.drawContours(mask_stopline, [contour], 0, 255, -1)
+        cv2.drawContours(mask_stopline, [contour], 0, 1, -1)
 
     return mask_stopline
 
@@ -67,8 +61,6 @@ def generate_mask(img):
 
     mask_white = cv2.inRange(hsv_img, WHITE_LOWER, WHITE_UPPER)
     mask_yellow = cv2.inRange(hsv_img, YELLOW_LOWER, YELLOW_UPPER)
-
-    print(f"Number of pixels in white mask: {sum(mask_white != 0)}")
 
     kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
     mask_white = clean_mask(mask_white, kernel, True)

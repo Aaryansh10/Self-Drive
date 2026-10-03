@@ -2,7 +2,7 @@ import numpy as np
 import torch
 
 def project_pixels_np(
-    v_sub, u_sub, subsample_step, 
+    v_sub, u_sub, subsample_step, bot_pitch,
     cx, cy, fx, fy, cam_pitch, cam_height, 
     min_angle=0.01, max_range=7.5
 ):
@@ -14,7 +14,7 @@ def project_pixels_np(
     u_full = u_sub * subsample_step
 
     alpha = np.arctan((v_full - cy) / fy)
-    angles = alpha + cam_pitch
+    angles = alpha + cam_pitch - bot_pitch
 
     ground_mask = angles >= min_angle
     valid_idx = np.nonzero(ground_mask)[0]
@@ -50,7 +50,7 @@ def project_pixels_np(
     return point_cloud
 
 def project_pixels_torch(
-    v_sub, u_sub, subsample_step, 
+    v_sub, u_sub, subsample_step, bot_pitch,
     cx, cy, fx, fy, cam_pitch, cam_height, 
     min_angle=0.01, max_range=7.5
 ):
@@ -62,7 +62,7 @@ def project_pixels_torch(
     u_full = u_sub * subsample_step
 
     alpha = torch.atan((v_full - cy) / fy)
-    angles = alpha + cam_pitch
+    angles = alpha + cam_pitch - bot_pitch
 
     ground_mask = angles >= min_angle
     valid_idx = torch.where(ground_mask)[0]
