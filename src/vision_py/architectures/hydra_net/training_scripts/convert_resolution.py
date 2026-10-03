@@ -140,6 +140,9 @@ def resize_det_json(src, dst, orig_w, orig_h, new_w, new_h, letterbox):
     with open(src, "r") as f:
         data = json.load(f)
 
+    if isinstance(data, dict):
+        data = [data]
+
     if letterbox:
         scale, rw, rh, top, bottom, left, right = compute_letterbox_params(
             orig_w, orig_h, new_w, new_h

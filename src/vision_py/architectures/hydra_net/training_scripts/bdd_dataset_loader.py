@@ -1,49 +1,5 @@
 """
 BDD100K dataset loader for HydraNet pretraining.
-
-Expects the standard unzipped BDD100K layout:
-    <root>/images/100k/{train,val}/*.jpg
-    <root>/labels/det_20/det_{train,val}.json
-    <root>/labels/drivable/masks/{train,val}/*.png
-    <root>/labels/lane/masks/{train,val}/*.png
-
-Produces, per sample:
-  image     : (3, H, W) float tensor, ImageNet-normalized
-  seg_mask  : (H, W) long tensor, proxy classes {0: background, 1: drivable
-              area, 2: lane marking} -- NOT your final class set, just a
-              pretraining proxy (see note below)
-  boxes     : (K, 4) float tensor, xyxy pixel coords in the resized image
-  labels    : (K,) long tensor, BDD detection category ids (0-9)
-
-IMPORTANT label simplifications (read before using beyond pretraining):
-  - Drivable-area masks encode {0: direct drivable, 1: alternative drivable,
-    2: background} per BDD's format; both drivable classes are collapsed
-    into a single "drivable area" class here.
-  - Lane masks pack category/direction/style into one byte, with 255 =
-    background (see BDD100K docs, "Lane Marking Format"). This loader
-    treats any non-255 pixel as "lane marking" without decoding
-    category/direction/style -- enough signal to pretrain generic
-    lane-texture features, but not a substitute for decoding the full
-    encoding if you later want per-category lane semantics.
-  - Where drivable-area and lane pixels overlap after resizing, lane wins
-    (thin lane lines are easy to lose to a coarser drivable blob otherwise).
-
-TRAIN-TIME AUGMENTATION (only applied when augment=True, i.e. split="train"):
-  - Random resized crop: crops a random region of the *original* image
-    (and its masks, in original resolution) before the final resize to
-    img_size, then re-derives box/mask coordinates against the crop. Boxes
-    that fall (almost) entirely outside the crop are dropped; boxes that
-    are partially outside are clipped to the crop boundary.
-  - Random horizontal flip (p=0.5): mirrors image, masks, and boxes
-    together. This does not attempt to relabel any left/right-specific
-    semantics -- there are none in this proxy label set (seg classes are
-    background/drivable/lane, and none of the BDD_DET_CLASSES are
-    lateral-direction-specific), so a plain mirror is safe here.
-  - Color jitter (brightness/contrast/saturation): image only, does not
-    touch geometry, so boxes/masks are untouched.
-  Validation/test splits are never augmented -- augment is forced off
-  unless explicitly requested, and the training script only turns it on
-  for the train split.
 """
 import json
 import os
@@ -52,10 +8,13 @@ from pathlib import Path
 
 import numpy as np
 import torch
+
 from PIL import Image, ImageEnhance
 from torch.utils.data import Dataset
 
-# BDD100K "Detection 2020" categories, in a fixed, stable order.
+from PIL import Image, ImageEnhance, ImageFile
+ImageFile.LOAD_TRUNCATED_IMAGES = True
+# BDD100K "Detection 2020" categories
 BDD_DET_CLASSES = [
     "pedestrian", "rider", "car", "truck", "bus", "train",
     "motorcycle", "bicycle", "traffic light", "traffic sign",
@@ -67,11 +26,6 @@ IMAGENET_STD = np.array([0.229, 0.224, 0.225], dtype=np.float32)
 
 
 def _random_crop_box(orig_w, orig_h, scale=(0.75, 1.0), ratio=(0.9, 1.1111)):
-    """Pick a random crop rectangle (x0, y0, cw, ch) from the original
-    image. Kept fairly conservative (scale down to 0.75x area) since BDD
-    scenes already have small/far objects that a more aggressive crop
-    (e.g. classic RandomResizedCrop's 0.08-1.0 range) would frequently
-    remove entirely."""
     area = orig_w * orig_h
     for _ in range(10):
         target_area = area * random.uniform(*scale)
@@ -86,14 +40,10 @@ def _random_crop_box(orig_w, orig_h, scale=(0.75, 1.0), ratio=(0.9, 1.1111)):
             y0 = random.randint(0, orig_h - ch)
             return x0, y0, cw, ch
 
-    # Fallback: no crop (use full image) if we couldn't sample a valid box.
     return 0, 0, orig_w, orig_h
 
 
 def _crop_and_clip_boxes(boxes, labels, x0, y0, cw, ch, min_size=2.0):
-    """Translate boxes into crop-local coordinates, clip to the crop, and
-    drop any box that's degenerate after clipping (i.e. was almost
-    entirely outside the crop)."""
     if len(boxes) == 0:
         return boxes, labels
 
@@ -111,9 +61,6 @@ def _crop_and_clip_boxes(boxes, labels, x0, y0, cw, ch, min_size=2.0):
 
 
 def _color_jitter(img, brightness=0.2, contrast=0.2, saturation=0.2):
-    """Lightweight color jitter using PIL's ImageEnhance, applied in a
-    random order with random factors in [1-x, 1+x]. Image-only; does not
-    touch geometry, so no need to touch boxes/masks."""
     ops = []
     if brightness > 0:
         ops.append(("brightness", random.uniform(1 - brightness, 1 + brightness)))
@@ -134,44 +81,106 @@ def _color_jitter(img, brightness=0.2, contrast=0.2, saturation=0.2):
 
 
 class BDDDataset(Dataset):
-    def __init__(self, root, split="train", img_size=(544, 960), augment=None):
-        """
-        root: path to the unzipped bdd100k root
-        split: "train" or "val"
-        img_size: (H, W), should match HydraNet's input_size
-        augment: whether to apply train-time augmentation (random crop,
-            horizontal flip, color jitter). Defaults to True for
-            split == "train" and False otherwise; pass explicitly to
-            override.
-        """
+    def __init__(self, root, split="train", img_size=(544, 960), augment=None, img_dir=None,
+                 label_size=None):
         super().__init__()
         self.root = Path(root)
         self.split = split
         self.out_h, self.out_w = img_size
         self.augment = (split == "train") if augment is None else augment
 
+        # Handle path layouts for images and labels
         self.img_dir = self.root / "images" / "100k" / split
-        self.drivable_dir = self.root / "labels" / "drivable" / "masks" / split
-        self.lane_dir = self.root / "labels" / "lane" / "masks" / split
-        det_json_path = self.root / "labels" / "det_20" / f"det_{split}.json"
+        if not self.img_dir.exists():
+            self.img_dir = self.root / "images" / split
+        if img_dir is not None:  # explicit folder that directly contains the images
+            self.img_dir = Path(img_dir).expanduser()
+
+        self.drivable_dir = self.root / "drivable_maps" / split
+        self.seg_dir = self.root / "seg_maps" / split
+        self.labels_dir = self.root / "labels" / split
+
+        if not self.img_dir.exists():
+            raise FileNotFoundError(f"Image directory not found at: {self.img_dir}")
 
         self.image_names = sorted(
-            f for f in os.listdir(self.img_dir) if f.lower().endswith((".jpg", ".jpeg"))
+            f for f in os.listdir(self.img_dir) if f.lower().endswith((".jpg", ".jpeg", ".png"))
         )
 
-        self.det_by_name = {}
-        if det_json_path.exists():
-            with open(det_json_path, "r") as f:
-                det_entries = json.load(f)
-            for entry in det_entries:
-                boxes, labels = [], []
-                for lab in entry.get("labels", []):
-                    cat = lab.get("category")
-                    box2d = lab.get("box2d")
-                    if cat in BDD_DET_CLASS_TO_ID and box2d is not None:
-                        boxes.append([box2d["x1"], box2d["y1"], box2d["x2"], box2d["y2"]])
-                        labels.append(BDD_DET_CLASS_TO_ID[cat])
-                self.det_by_name[entry["name"]] = (boxes, labels)
+        print(f"[{split}] Pre-caching JSON labels for {len(self.image_names)} images...")
+        self.label_cache = {}
+        for name in self.image_names:
+            stem = os.path.splitext(name)[0]
+            json_path = self.labels_dir / f"{stem}.json"
+            self.label_cache[stem] = self._load_json_labels(json_path)
+
+        self.label_w, self.label_h = self._resolve_label_frame(label_size)
+        print(f"[{split}] Successfully cached labels. Loaded dataset with {len(self.image_names)} images from {self.img_dir}")
+
+    def _resolve_label_frame(self, label_size):
+        """Returns (label_w, label_h): the pixel frame the JSON boxes live in.
+        Boxes are later scaled by (image_w / label_w, image_h / label_h)."""
+        img0 = Image.open(self.img_dir / self.image_names[0])
+        W, H = img0.size
+        if isinstance(label_size, (tuple, list)):
+            return int(label_size[0]), int(label_size[1])
+        if label_size == "raw":
+            return 1280, 720
+        if label_size == "image":
+            return W, H
+
+        xs = ys = 0.0
+        n = 0
+        for boxes, _ in self.label_cache.values():
+            for b in boxes:
+                xs, ys, n = max(xs, b[2]), max(ys, b[3]), n + 1
+        if n < 100:
+            print(f"[{self.split}] WARNING: only {n} boxes, cannot detect label frame; assuming raw 1280x720")
+            return 1280, 720
+        for fw, fh in ((1280, 720), (960, 544), (W, H)):
+            if 0.97 * fw <= xs <= 1.005 * fw and ys <= 1.005 * fh:
+                print(f"[{self.split}] label frame detected: {fw}x{fh} (max box x2={xs:.0f}, y2={ys:.0f}); "
+                      f"image {W}x{H} -> box scale {W / fw:.4f}, {H / fh:.4f}")
+                return fw, fh
+        print(f"[{self.split}] WARNING: label frame unclear (max x2={xs:.0f}, y2={ys:.0f}, image {W}x{H}); "
+              f"assuming labels are already in image frame. Pass label_size=... to override.")
+        return W, H
+
+    def _load_json_labels(self, json_path):
+        boxes, labels = [], []
+        if not json_path.exists():
+            return boxes, labels
+
+        with open(json_path, "r") as f:
+            data = json.load(f)
+
+        # Extract objects array from data["frames"][0]["objects"]
+        objects_list = []
+        if isinstance(data, dict):
+            frames = data.get("frames", [])
+            if frames and isinstance(frames[0], dict):
+                objects_list = frames[0].get("objects", [])
+
+        for obj in objects_list:
+            if not isinstance(obj, dict):
+                continue
+
+            cat = obj.get("category")
+            box2d = obj.get("box2d")
+
+            if cat in BDD_DET_CLASS_TO_ID and isinstance(box2d, dict):
+                x1 = box2d.get("x1")
+                y1 = box2d.get("y1")
+                x2 = box2d.get("x2")
+                y2 = box2d.get("y2")
+
+                if all(v is not None for v in (x1, y1, x2, y2)):
+                    # kept in the label file's own coordinate frame; rescaled to the
+                    # real image size in __getitem__ (see _resolve_label_frame)
+                    boxes.append([float(x1), float(y1), float(x2), float(y2)])
+                    labels.append(BDD_DET_CLASS_TO_ID[cat])
+
+        return boxes, labels
 
     def __len__(self):
         return len(self.image_names)
@@ -180,23 +189,36 @@ class BDDDataset(Dataset):
         name = self.image_names[idx]
         stem = os.path.splitext(name)[0]
 
-        # ---- load image at original resolution ----
         img = Image.open(self.img_dir / name).convert("RGB")
         orig_w, orig_h = img.size
 
-        # ---- load raw boxes/labels (original-image pixel coords) ----
-        raw_boxes, raw_labels = self.det_by_name.get(name, ([], []))
+        # Retrieve cached labels directly from memory
+        raw_boxes, raw_labels = self.label_cache.get(stem, ([], []))
+
         boxes_np = np.array(raw_boxes, dtype=np.float32).reshape(-1, 4)
         labels_np = np.array(raw_labels, dtype=np.int64)
+        if len(boxes_np) > 0:  # label frame -> actual image pixels
+            boxes_np[:, [0, 2]] *= orig_w / self.label_w
+            boxes_np[:, [1, 3]] *= orig_h / self.label_h
 
-        # ---- load drivable/lane masks at original resolution (if present) ----
-        drivable_path = self.drivable_dir / f"{stem}.png"
-        drivable_img = Image.open(drivable_path) if drivable_path.exists() else None
+        # Fast direct loading
+        drivable_path = self.drivable_dir / f"{stem}_drivable_color.png"
+        try:
+            drivable_img = Image.open(drivable_path)
+        except (FileNotFoundError, OSError):
+            drivable_img = None
 
-        lane_path = self.lane_dir / f"{stem}.png"
-        lane_img = Image.open(lane_path) if lane_path.exists() else None
+        # NOTE: seg_maps/*_train_color.png are Cityscapes-style SEMANTIC colour maps
+        # (road, sidewalk, car, ...) and contain NO lane-marking class, so they cannot
+        # fill class 2. Left disabled; class 2 stays unused until a real lane map exists.
+        lane_img = None
 
-        # ---- train-time augmentation, applied pre-resize on original-res data ----
+        # make the maps pixel-aligned with the image before cropping/flipping
+        if drivable_img is not None and drivable_img.size != img.size:
+            drivable_img = drivable_img.resize(img.size, Image.NEAREST)
+        if lane_img is not None and lane_img.size != img.size:
+            lane_img = lane_img.resize(img.size, Image.NEAREST)
+
         if self.augment:
             x0, y0, cw, ch = _random_crop_box(orig_w, orig_h)
             img = img.crop((x0, y0, x0 + cw, y0 + ch))
@@ -206,7 +228,6 @@ class BDDDataset(Dataset):
                 lane_img = lane_img.crop((x0, y0, x0 + cw, y0 + ch))
             boxes_np, labels_np = _crop_and_clip_boxes(boxes_np, labels_np, x0, y0, cw, ch)
 
-            # dims to scale against are now the crop dims, not the original image
             src_w, src_h = cw, ch
 
             if random.random() < 0.5:
@@ -224,8 +245,8 @@ class BDDDataset(Dataset):
             img = _color_jitter(img)
         else:
             src_w, src_h = orig_w, orig_h
+            boxes_np, labels_np = _crop_and_clip_boxes(boxes_np, labels_np, 0, 0, orig_w, orig_h)
 
-        # ---- resize image to model input size ----
         img = img.resize((self.out_w, self.out_h), Image.BILINEAR)
         img_np = np.asarray(img, dtype=np.float32) / 255.0
         img_np = (img_np - IMAGENET_MEAN) / IMAGENET_STD
@@ -234,7 +255,6 @@ class BDDDataset(Dataset):
         sx = self.out_w / src_w
         sy = self.out_h / src_h
 
-        # ---- finalize boxes/labels in resized-image coords ----
         if len(boxes_np) > 0:
             boxes_np[:, [0, 2]] *= sx
             boxes_np[:, [1, 3]] *= sy
@@ -244,27 +264,24 @@ class BDDDataset(Dataset):
             boxes = torch.zeros((0, 4), dtype=torch.float32)
             labels = torch.zeros((0,), dtype=torch.long)
 
-        # ---- segmentation proxy mask ----
         seg_mask = np.zeros((self.out_h, self.out_w), dtype=np.int64)
 
         if drivable_img is not None:
-            drv = drivable_img.resize((self.out_w, self.out_h), Image.NEAREST)
-            drv_np = np.asarray(drv)
-            seg_mask[drv_np < 2] = 1  # 0,1 = drivable variants; 2 = background
+            # colour map: black = background, red = direct drivable, blue = alternative
+            drv = drivable_img.convert("RGB").resize((self.out_w, self.out_h), Image.NEAREST)
+            drv_np = np.asarray(drv).max(axis=2)
+            seg_mask[drv_np > 0] = 1
 
         if lane_img is not None:
             lane = lane_img.resize((self.out_w, self.out_h), Image.NEAREST)
             lane_np = np.asarray(lane)
-            seg_mask[lane_np != 255] = 2  # lane overrides drivable where present
+            seg_mask[lane_np != 255] = 2
 
         seg_mask = torch.from_numpy(seg_mask)
 
         return {"image": image, "seg_mask": seg_mask, "boxes": boxes, "labels": labels, "name": name}
 
-
 def bdd_collate_fn(batch):
-    """Images/masks stack normally; boxes/labels stay as a per-image list
-    since each image has a different number of objects."""
     images = torch.stack([b["image"] for b in batch], dim=0)
     seg_masks = torch.stack([b["seg_mask"] for b in batch], dim=0)
     boxes = [b["boxes"] for b in batch]

@@ -28,6 +28,10 @@ def giou_loss(pred_boxes, target_boxes, reduction="mean", eps=1e-7):
     if pred_boxes.numel() == 0:
         return pred_boxes.sum() * 0.0  # zero loss, keeps the autograd graph valid
 
+    # FIX: compute in fp32 so w*h in pixels doesn't overflow fp16 (max 65504)
+    pred_boxes = pred_boxes.float()
+    target_boxes = target_boxes.float()
+
     px1, py1, px2, py2 = pred_boxes.unbind(-1)
     tx1, ty1, tx2, ty2 = target_boxes.unbind(-1)
 
@@ -74,8 +78,9 @@ class MultiTaskLoss(nn.Module):
         for i, name in enumerate(self.task_names):
             if name not in losses:
                 continue
-            precision = torch.exp(-self.log_vars[i])
-            weighted_loss = precision * losses[name] + self.log_vars[i]
+            log_var = self.log_vars[i].clamp(-3.0, 3.0)  # stop runaway weights
+            precision = torch.exp(-log_var)
+            weighted_loss = precision * losses[name] + log_var
             weighted[name] = weighted_loss
             total = total + weighted_loss
         return total, weighted

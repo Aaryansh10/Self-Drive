@@ -29,8 +29,19 @@ def build_strides_per_point(img_h, img_w, strides=(8, 16, 32)):
     return torch.cat(parts, dim=0)
 
 
+def build_point_ranges(strides_per_point, scale_ranges=((0, 64), (64, 128), (128, float("inf")))):
+    """Vectorized (no .item() loops): per-point low/high scale range."""
+    uniq = torch.unique(strides_per_point)  # sorted ascending
+    idx = torch.searchsorted(uniq, strides_per_point)
+    dev = strides_per_point.device
+    low = torch.tensor([r[0] for r in scale_ranges], device=dev, dtype=torch.float32)[idx]
+    high = torch.tensor([r[1] for r in scale_ranges], device=dev, dtype=torch.float32)[idx]
+    return low, high
+
+
 def assign_targets(points, strides_per_point, gt_boxes, gt_labels, num_classes,
-                    scale_ranges=((0, 64), (64, 128), (128, float("inf")))):
+                    scale_ranges=((0, 64), (64, 128), (128, float("inf"))),
+                    point_low=None, point_high=None):
     """
     points:            (N, 2) xy grid centers, pixel space
     strides_per_point: (N,) stride of the level each point belongs to
@@ -59,10 +70,8 @@ def assign_targets(points, strides_per_point, gt_boxes, gt_labels, num_classes,
     if k == 0:
         return cls_target, reg_target, ctr_target, pos_mask
 
-    unique_strides = sorted(set(strides_per_point.tolist()))
-    stride_to_range = {s: scale_ranges[i] for i, s in enumerate(unique_strides)}
-    point_low = torch.tensor([stride_to_range[s.item()][0] for s in strides_per_point], device=device)
-    point_high = torch.tensor([stride_to_range[s.item()][1] for s in strides_per_point], device=device)
+    if point_low is None or point_high is None:
+        point_low, point_high = build_point_ranges(strides_per_point, scale_ranges)
 
     xs = points[:, 0].unsqueeze(1)  # (N, 1)
     ys = points[:, 1].unsqueeze(1)  # (N, 1)
@@ -112,8 +121,10 @@ def assign_targets_batch(points, strides_per_point, gt_boxes_list, gt_labels_lis
                           num_classes, scale_ranges=((0, 64), (64, 128), (128, float("inf")))):
     """Per-image assign_targets, stacked into a batch dimension."""
     cls_targets, reg_targets, ctr_targets, pos_masks = [], [], [], []
+    point_low, point_high = build_point_ranges(strides_per_point, scale_ranges)  # once per batch
     for boxes, labels in zip(gt_boxes_list, gt_labels_list):
-        c, r, ct, p = assign_targets(points, strides_per_point, boxes, labels, num_classes, scale_ranges)
+        c, r, ct, p = assign_targets(points, strides_per_point, boxes, labels, num_classes,
+                                     scale_ranges, point_low, point_high)
         cls_targets.append(c)
         reg_targets.append(r)
         ctr_targets.append(ct)
