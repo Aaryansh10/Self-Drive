@@ -10,7 +10,6 @@ __pycache__/
 *.engine
 *dataset
 src/Data/
-**/*.pt
 **/eval_out/
 **/label_check/
 **/speed.py
