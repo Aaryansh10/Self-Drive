@@ -16,3 +16,5 @@ WORKDIR /workspace/Self-Drive
 
 CMD ["bash"]
 
+
+## pip install tqdm

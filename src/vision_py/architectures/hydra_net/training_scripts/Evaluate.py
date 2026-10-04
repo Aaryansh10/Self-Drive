@@ -4,7 +4,7 @@ Evaluate a pretrained HydraNet checkpoint on a BDD100K split.
 Run from the hydra_net folder (same way as training):
 
   PYTHONPATH=.:.. python3 evaluate_bdd.py \
-      --bdd_root ~/Manas/Self-Drive/src/Data/bdd100k_images_100k/100k/test \
+      --bdd_root ~/Manas/Self-Drive/src/Data/bdd100k_960x544 \
       --ckpt bdd_pretrained_base.pt --split test
 
 Outputs:
@@ -113,7 +113,9 @@ def save_vis(image_t, pred_seg, boxes, scores, labels, path):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--bdd_root", required=True)
+    ap.add_argument("--bdd_root", default=None)
+    ap.add_argument("--img_dir", default=None,
+                    help="folder that directly contains the images (use for unlabeled test images)")
     ap.add_argument("--ckpt", default="bdd_pretrained_base.pt")
     ap.add_argument("--split", default="val")
     ap.add_argument("--img_h", type=int, default=544)
@@ -121,6 +123,8 @@ def main():
     ap.add_argument("--batch_size", type=int, default=8)
     ap.add_argument("--num_workers", type=int, default=4)
     ap.add_argument("--max_images", type=int, default=None)
+    ap.add_argument("--start", type=int, default=0,
+                    help="skip the first N images (sorted order); e.g. --start 10 --max_images 10 = images 11-20")
     ap.add_argument("--map_score_thr", type=float, default=0.05)
     ap.add_argument("--vis_score_thr", type=float, default=0.3)
     ap.add_argument("--vis_n", type=int, default=30)
@@ -140,7 +144,20 @@ def main():
     model.to(device).eval()
     print(f"Loaded {args.ckpt} (variant '{ck['model_variant']}', epoch {ck.get('epoch', '?')})")
 
-    ds = BDDDataset(args.bdd_root, split=args.split, img_size=(args.img_h, args.img_w), augment=False)
+    if args.bdd_root is None:
+        if args.img_dir is None:
+            raise SystemExit("give --bdd_root or --img_dir")
+        args.bdd_root = args.img_dir
+    ds = BDDDataset(args.bdd_root, split=args.split, img_size=(args.img_h, args.img_w),
+                    augment=False, img_dir=args.img_dir)
+    if len(ds) == 0:
+        raise SystemExit(f"No .jpg/.png images found directly inside: {ds.img_dir}")
+    if args.start or args.max_images:
+        end = None if args.max_images is None else args.start + args.max_images
+        ds.image_names = ds.image_names[args.start:end]
+        if len(ds) == 0:
+            raise SystemExit(f"--start {args.start} is past the end of the folder")
+        print(f"Using images {args.start + 1} to {args.start + len(ds)} (sorted order)")
     has_labels = ds.labels_dir.exists() and ds.drivable_dir.exists()
     if not has_labels:
         print(f"[info] no labels found for split '{args.split}' -> only saving visualizations, no metrics.")

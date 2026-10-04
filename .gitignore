@@ -14,3 +14,8 @@ src/Data/
 **/eval_out/
 **/label_check/
 **/speed.py
+**/eval_sim_out/
+**/check_labels_sim.py
+**/check_labels.py
+**/eval_out/
+**/label_check_sim/
