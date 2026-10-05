@@ -25,6 +25,7 @@ setup(
     entry_points={
         'console_scripts': [
             'vision_cv = vision_py.vision_cv:main',
+            'model_output = vision_py.model_output:main',
         ],
     },
 )
