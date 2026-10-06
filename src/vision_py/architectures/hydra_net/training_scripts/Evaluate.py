@@ -1,9 +1,9 @@
 """
 Evaluate a pretrained HydraNet checkpoint on a BDD100K split.
 
-Run from the hydra_net folder (same way as training):
+Run from any directory (e.g., from hydra_net or src):
 
-  PYTHONPATH=.:.. python3 evaluate_bdd.py \
+  python3 training_scripts/Evaluate.py \
       --bdd_root ~/Manas/Self-Drive/src/Data/bdd100k_960x544 \
       --ckpt bdd_pretrained_base.pt --split test
 
@@ -14,7 +14,19 @@ Outputs:
 """
 import argparse
 import os
+import sys
 import time
+from pathlib import Path
+
+# Path setup: ensure both vision_py and hydra_net are in sys.path
+eval_script_path = Path(__file__).resolve()
+hydra_net_dir = eval_script_path.parents[1]  # points to .../hydra_net
+vision_py_dir = eval_script_path.parents[3]  # points to .../vision_py
+
+if str(hydra_net_dir) not in sys.path:
+    sys.path.insert(0, str(hydra_net_dir))
+if str(vision_py_dir) not in sys.path:
+    sys.path.insert(0, str(vision_py_dir))
 
 import cv2
 import numpy as np
@@ -22,10 +34,11 @@ import torch
 from torch.utils.data import DataLoader
 from torchvision.ops import batched_nms, box_iou
 
-from hydra_net.model import build_hydranet
-from training_scripts.bdd_dataset_loader import (
+from architectures.model import build_hydranet
+from bdd_dataset_loader import (
     BDDDataset, bdd_collate_fn, BDD_DET_CLASSES, IMAGENET_MEAN, IMAGENET_STD,
 )
+
 
 
 @torch.no_grad()
@@ -128,7 +141,7 @@ def main():
     ap.add_argument("--map_score_thr", type=float, default=0.05)
     ap.add_argument("--vis_score_thr", type=float, default=0.3)
     ap.add_argument("--vis_n", type=int, default=30)
-    ap.add_argument("--out_dir", default="eval_out")
+    ap.add_argument("--out_dir", default="eval_out_deep")
     args = ap.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -149,7 +162,7 @@ def main():
             raise SystemExit("give --bdd_root or --img_dir")
         args.bdd_root = args.img_dir
     ds = BDDDataset(args.bdd_root, split=args.split, img_size=(args.img_h, args.img_w),
-                    augment=False, img_dir=args.img_dir)
+                augment=False)
     if len(ds) == 0:
         raise SystemExit(f"No .jpg/.png images found directly inside: {ds.img_dir}")
     if args.start or args.max_images:
@@ -158,7 +171,7 @@ def main():
         if len(ds) == 0:
             raise SystemExit(f"--start {args.start} is past the end of the folder")
         print(f"Using images {args.start + 1} to {args.start + len(ds)} (sorted order)")
-    has_labels = ds.labels_dir.exists() and ds.drivable_dir.exists()
+    has_labels = hasattr(ds, "lane_dir") and ds.lane_dir.exists()
     if not has_labels:
         print(f"[info] no labels found for split '{args.split}' -> only saving visualizations, no metrics.")
     loader = DataLoader(ds, batch_size=args.batch_size, shuffle=False,

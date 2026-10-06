@@ -18,3 +18,7 @@ src/Data/
 **/check_labels.py
 **/eval_out/
 **/label_check_sim/
+**/.pt
+*.pt
+*.pt
+src/vision_py/architectures/hydra_net/eval_out_deep/
