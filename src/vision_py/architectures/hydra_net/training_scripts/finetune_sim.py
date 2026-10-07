@@ -22,19 +22,64 @@ Ctrl+C saves <out>_last.pt; continue later with  --resume <out>_last.pt  (same o
 import argparse
 import math
 import os
+import sys
 import time
+from pathlib import Path
+import cv2
+cv2.setNumThreads(0)
+
+# Path setup: ensure proper directory hierarchy is in sys.path
+script_path = Path(__file__).resolve()
+training_scripts_dir = script_path.parents[0]  # points to .../training_scripts
+hydra_net_dir = script_path.parents[1]         # points to .../hydra_net
+architectures_dir = script_path.parents[2]     # points to .../architectures
+vision_py_dir = script_path.parents[3]         # points to .../vision_py
+
+for p in [training_scripts_dir, hydra_net_dir, architectures_dir, vision_py_dir]:
+    if str(p) not in sys.path:
+        sys.path.insert(0, str(p))
+
+import torch
+torch.backends.cudnn.benchmark = True
+torch.backends.cuda.matmul.allow_tf32 = True
+torch.backends.cudnn.allow_tf32 = True
+import torch.nn.functional as F
+from torch.utils.data import DataLoader, WeightedRandomSampler
+
+from architectures.model import MODEL_VARIANTS, build_hydranet
+from sim_dataset_loader import (
+    SimDataset, sim_collate_fn, SIM_SEG_CLASSES, SIM_OBJ_CLASSES,
+)
+from target_assigner import build_strides_per_point, assign_targets_batch
+from pretrain_losses import sigmoid_focal_loss, giou_loss, MultiTaskLoss
+from eval_utils import evaluate_model
+
+"""
+import argparse
+import math
+import os
+import time
+import sys
+from pathlib import Path
+
+# Add the parent architecture directory to sys.path so 'hydra_net' is recognized as a package
+ROOT_DIR = Path(__file__).resolve().parent.parent
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+
 
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, WeightedRandomSampler
 
-from hydra_net.model import MODEL_VARIANTS, build_hydranet
+from model import MODEL_VARIANTS, build_hydranet
 from training_scripts.sim_dataset_loader import (
     SimDataset, sim_collate_fn, SIM_SEG_CLASSES, SIM_OBJ_CLASSES,
 )
 from training_scripts.target_assigner import build_strides_per_point, assign_targets_batch
 from training_scripts.pretrain_losses import sigmoid_focal_loss, giou_loss, MultiTaskLoss
 from training_scripts.eval_utils import evaluate_model
+"""
 
 NUM_SEG = len(SIM_SEG_CLASSES)   # 4
 NUM_OBJ = len(SIM_OBJ_CLASSES)   # 5
@@ -251,12 +296,14 @@ def main():
     steps_per_epoch = len(train_loader)
     total_steps = args.epochs * steps_per_epoch
     start_epoch, step, best_score, bad_epochs = 0, 0, -1.0, 0
+    
     if args.resume:
         ck = torch.load(args.resume, map_location=device, weights_only=False)
         model.load_state_dict(ck["full_state_dict"])
         optimizer.load_state_dict(ck["optimizer"])
         mt_loss.load_state_dict(ck["mt_loss"])
-        scaler.load_state_dict(ck["scaler"])
+        if ck["scaler"] and len(ck["scaler"]) > 0:
+            scaler.load_state_dict(ck["scaler"])
         start_epoch, step, best_score = ck["next_epoch"], ck["step"], ck["best_score"]
         print(f"Resumed from {args.resume}: epoch {start_epoch + 1}, step {step}, best score {best_score:.4f}")
 

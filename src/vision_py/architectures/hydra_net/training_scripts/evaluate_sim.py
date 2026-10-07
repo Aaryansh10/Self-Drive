@@ -18,7 +18,19 @@ import torch
 from PIL import Image, ImageDraw
 from torch.utils.data import DataLoader
 
-from hydra_net.model import build_hydranet
+import sys
+from pathlib import Path
+
+script_path = Path(__file__).resolve()
+hydra_net_dir = script_path.parents[1]         # points to .../hydra_net
+architectures_dir = script_path.parents[2]     # points to .../architectures
+vision_py_dir = script_path.parents[3]         # points to .../vision_py
+
+for p in [hydra_net_dir, architectures_dir, vision_py_dir]:
+    if str(p) not in sys.path:
+        sys.path.insert(0, str(p))
+
+from architectures.model import MODEL_VARIANTS, build_hydranet
 from training_scripts.sim_dataset_loader import (
     SimDataset, sim_collate_fn, SIM_SEG_CLASSES, SIM_OBJ_CLASSES,
 )
@@ -81,7 +93,7 @@ def main():
     ap.add_argument("--max_images", type=int, default=None)
     ap.add_argument("--score_thr", type=float, default=0.3)
     ap.add_argument("--vis_n", type=int, default=30)
-    ap.add_argument("--out_dir", default="eval_sim_out")
+    ap.add_argument("--out_dir", default="eval_sim_out_deep")
     ap.add_argument("--val_frac", type=float, default=0.10)
     ap.add_argument("--test_frac", type=float, default=0.10)
     ap.add_argument("--split_seed", type=int, default=0)
