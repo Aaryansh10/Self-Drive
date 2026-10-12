@@ -1,0 +1,10 @@
+int32 class_id
+string class_name
+float32 score
+float32 x1
+float32 y1
+float32 x2
+float32 y2
+bool is_in_lane
+bool is_stop_sign
+float32 sign_real_prob

@@ -76,7 +76,7 @@ class HydraNetRecorder(Node):
 
         p = self.get_parameter
         self.input_hw = (int(p("input_height").value), int(p("input_width").value))
-        self.num_obj = int(p("num_obj_classes").value)
+        self.num_obj = int(p("num_objweights_path = os.path.join(current_dir, 'architectures', 'hydra_net', 'sim_finetuned.pt')_classes").value)
         self.score_thresh = float(p("score_thresh").value)
         self.nms_iou = float(p("nms_iou").value)
         self.max_dets = int(p("max_dets").value)
