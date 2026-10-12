@@ -1,0 +1,26 @@
+# ---- Goal: sent by the Behavior Tree when an obstacle (barrel/pedestrian/pothole/tire) is detected ----
+float64 obstacle_distance     # m, straight ahead along the lane, measured from the base frame origin
+float64 completion_distance   # m, lane change must be finished this far before the obstacle (0 = param default, 3.505 m = 11.5 ft)
+float64 target_speed          # m/s (0 = automatic: 85% of current speed, clamped to 1..5 mph)
+bool target_lane_free         # BT assertion that the other lane is free for the whole manoeuvre
+---
+# ---- Result ----
+uint8 SUCCESS=0
+uint8 TOO_LATE=1
+uint8 LANE_LOST=2
+uint8 TIMEOUT=3
+uint8 TARGET_BLOCKED=4
+uint8 CANCELED=5
+uint8 INVALID_GOAL=6
+uint8 NO_DATA=7
+uint8 INVALID_TARGET_LINE=8
+uint8 code
+string message
+float64 body_clear_distance   # m, front-to-obstacle distance when the body was fully in the new lane (-1 = not observed)
+bool in_window                # true if that distance was within 10..13 ft
+---
+# ---- Feedback ----
+string phase                  # WAITING | CHANGING | SETTLING
+float64 remaining_to_obstacle # m, front to obstacle
+float64 lateral_error         # m, tracking error to the planned lateral profile
+float64 progress              # 0..1 of the lateral shift
