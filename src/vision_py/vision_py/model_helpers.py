@@ -3,16 +3,20 @@ import numpy as np
 import torch
 from torchvision.ops import batched_nms
 
-def preprocess(self, img_bgr):
+def preprocess(
+        img_bgr, device='cuda', use_fp16=False,
+        mean=np.array([0.485, 0.456, 0.406] ,dtype=np.float32).reshape(1, 1, 3), 
+        std=np.array([0.229, 0.224, 0.225], dtype=np.float32).reshape(1, 1, 3),
+    ):
     img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
-    x = (img_rgb.astype(np.float32) / 255.0 - self.mean) / self.std
+    x = (img_rgb.astype(np.float32) / 255.0 - mean) / std
     x = torch.from_numpy(x).permute(2, 0, 1).unsqueeze(0).contiguous()
-    x = x.to(self.device)
-    return x.half() if self.use_fp16 else x
+    x = x.to(device)
+    return x.half() if use_fp16 else x
 
-def load_weights(self, weights):
+def load_weights(model, weights):
     if not weights:
-        self.get_logger().warn("No weights given!")
+        print("No weights given!")
         return
 
     ckpt = torch.load(weights, map_location="cpu", weights_only=False)
@@ -26,7 +30,7 @@ def load_weights(self, weights):
     elif is_state_dict(ckpt):
         state = ckpt
     elif isinstance(ckpt, dict):
-        self.get_logger().info(f"Checkpoint top-level keys: {list(ckpt.keys())}")
+        print(f"Checkpoint top-level keys: {list(ckpt.keys())}")
         preferred = (
             "ema", "ema_state_dict", "model_state_dict", 
             "state_dict","model_state", "model", "net", "weights"
@@ -36,7 +40,7 @@ def load_weights(self, weights):
             if isinstance(v, torch.nn.Module):
                 v = v.state_dict()
             if is_state_dict(v):
-                self.get_logger().info(f"Using checkpoint entry '{key}'")
+                print(f"Using checkpoint entry '{key}'")
                 state = v
                 break
     if state is None:
@@ -45,15 +49,15 @@ def load_weights(self, weights):
     # strip DataParallel / DDP prefix if present
     state = {k[7:] if k.startswith("module.") else k: v for k, v in state.items()}
 
-    missing, unexpected = self.model.load_state_dict(state, strict=False)
+    missing, unexpected = model.load_state_dict(state, strict=False)
     msg = f"Loaded weights from {weights} (missing={len(missing)}, unexpected={len(unexpected)})"
     if missing or unexpected:
-        self.get_logger().error(msg + f" e.g. missing={missing[:3]} unexpected={unexpected[:3]}")
+        print(msg + f" e.g. missing={missing[:3]} unexpected={unexpected[:3]}")
     else:
-        self.get_logger().info(msg)
+        print(msg)
 
 @torch.no_grad()
-def postprocess_detections(self, det, scale_xy, frame_wh):
+def postprocess_detections(det, scale_xy, frame_wh, score_thresh, nms_iou, max_detections):
     class_logits = det["cls_logits"][0].float().sigmoid()  # (N, C)
     centreness = det["centerness"][0].float().sigmoid()  # (N, 1)
     boxes = det["boxes"][0].float()  # (N, 4) xyxy, input px
@@ -69,7 +73,7 @@ def postprocess_detections(self, det, scale_xy, frame_wh):
 
     scores = (class_logits * centreness).sqrt()  # (N, C)
     flat = scores.flatten()
-    idx = (flat > self.score_thresh).nonzero(as_tuple=True)[0]
+    idx = (flat > score_thresh).nonzero(as_tuple=True)[0]
     if idx.numel() == 0:
         return empty()
 
@@ -80,7 +84,7 @@ def postprocess_detections(self, det, scale_xy, frame_wh):
     labels = idx % num_classes
     selected_boxes, selected_scores = boxes[anchor_idx], flat[idx]
 
-    k = batched_nms(selected_boxes, selected_scores, labels, self.nms_iou)[: self.max_detections]
+    k = batched_nms(selected_boxes, selected_scores, labels, nms_iou)[: max_detections]
     model_boxes, selected_scores, labels = selected_boxes[k], selected_scores[k], labels[k]
 
     # rescale to original frame (separate copy; model_boxes stays in model space)

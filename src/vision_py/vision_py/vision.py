@@ -2,17 +2,20 @@ import os
 import numpy as np
 import torch
 
+import rclpy
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data, ReliabilityPolicy, HistoryPolicy, QoSProfile
 from sensor_msgs.msg import Image, CameraInfo, PointCloud2, Imu, PointField
 from vision_interfaces.msg import DetectionArray, Detection2D
 from std_msgs.msg import Header
+from nav_msgs.msg import Path
+from geometry_msgs.msg import PoseStamped
 from cv_bridge import CvBridge
 
 from vision_py.architectures.hydra_net.model import build_hydranet
-from vision_py.vision_py.centerline import CenterlineGenerator
-from vision_py.vision_py.ipm import project_pixels_torch
-from vision_py.vision_py.model_helpers import load_weights, preprocess, postprocess_detections
+from vision_py.centerline import CenterlineGenerator
+from vision_py.ipm import project_pixels_torch
+from vision_py.model_helpers import load_weights, preprocess, postprocess_detections
 
 class Vision(Node):
     def __init__(self):
@@ -27,8 +30,8 @@ class Vision(Node):
         self.declare_parameter("pc_stopline_topic", "/pc_stopline")
         self.declare_parameter("detections_topic", "/detections")
 
-        self.declare_parameter("subsample_step", 4)
-        self.declare_parameter("cam_pitch", 10)
+        self.declare_parameter("subsample_step", 1)
+        self.declare_parameter("cam_pitch", 0.4)
         self.declare_parameter("cam_height", 1.606)
 
         current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -40,14 +43,15 @@ class Vision(Node):
         self.declare_parameter("input_width", 960)
         self.declare_parameter("num_seg_classes", 4)
         self.declare_parameter("num_obj_classes", 5)
-        self.declare_parameter("class_names", ["barrel, tyre, pothole, sign, pedestrian"])  # optional detection names
+        self.declare_parameter("class_names", ["barrel", "tyre", "pothole", "sign", "pedestrian"])  # optional detection names
         self.declare_parameter("score_thresh", 0.35)
         self.declare_parameter("nms_iou", 0.5)
         self.declare_parameter("max_detections", 50)
         self.declare_parameter("mask_alpha", 0.45)
 
-        self.declare_parameter("cluster_gap", 1.0)
-        
+        self.declare_parameter("left_centerline_topic", "/path/left_centerline")
+        self.declare_parameter("right_centerline_topic", "/path/right_centerline")        
+        self.declare_parameter("ground_frame", "link_base")
 
         self.image_topic = self.get_parameter("image_topic").value
         self.cam_info_topic = self.get_parameter("cam_info_topic").value
@@ -56,9 +60,12 @@ class Vision(Node):
         self.pc_yellowlane_topic = self.get_parameter("pc_yellowlane_topic").value
         self.pc_stopline_topic = self.get_parameter("pc_stopline_topic").value
         self.detections_topic = self.get_parameter("detections_topic").value
+        self.left_centerline_topic = self.get_parameter("left_centerline_topic").value
+        self.right_centerline_topic = self.get_parameter("right_centerline_topic").value
         self.subsample_step = self.get_parameter("subsample_step").value
         self.cam_pitch = self.get_parameter("cam_pitch").value
         self.cam_height = self.get_parameter("cam_height").value
+        self.ground_frame = self.get_parameter("ground_frame").value
 
         self.weights = self.get_parameter("weights").value
         self.model_variant = self.get_parameter("model_variant").value
@@ -75,7 +82,7 @@ class Vision(Node):
 
         # --- HydraNet model ---
         self.model = build_hydranet(self.model_variant)
-        load_weights(self.weights)
+        load_weights(self.model, self.weights)
         self.device = "cuda"
         self.model.to(self.device).eval()
         if self.use_fp16:
@@ -122,17 +129,30 @@ class Vision(Node):
             history=HistoryPolicy.KEEP_LAST,
             depth=5,
         )
-        self.detections_pub_ = self.create_subscription(
+        self.detections_pub_ = self.create_publisher(
             DetectionArray,
             self.detections_topic,
             detections_qos
         )
+        path_qos = QoSProfile(
+            reliability=ReliabilityPolicy.RELIABLE,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=1,
+        )
+        self.left_centerline_pub_ = self.create_publisher(
+            Path,
+            self.left_centerline_topic,
+            path_qos
+        )
+        self.right_centerline_pub_ = self.create_publisher(
+            Path,
+            self.right_centerline_topic,
+            path_qos
+        )
 
         # --- Data members ---
         self.bridge = CvBridge()
-        self.centerline_generator = CenterlineGenerator(
-
-        )
+        self.centerline_generator = CenterlineGenerator()
         self.mean = np.array([0.485, 0.456, 0.406] ,dtype=np.float32).reshape(1, 1, 3)
         self.std = np.array([0.229, 0.224, 0.225], dtype=np.float32).reshape(1, 1, 3)
         self.cam_info_recieved = False
@@ -143,35 +163,40 @@ class Vision(Node):
     # --- Callbacks ---
 
     def img_cb(self, msg):
+        header = Header()
+        header.stamp = msg.header.stamp
+        header.frame_id = self.ground_frame
+        
         if self.cam_info_recieved == False:
             return
         img = self.bridge.imgmsg_to_cv2(msg, desired_encoding="bgr8")
 
-        x = preprocess(img)
+        x = preprocess(img, device=self.device, use_fp16=self.use_fp16)
         with torch.no_grad():
             out = self.model(x)
 
         lane_logits, detections = out["lane_logits"], out["detection"]
         model_boxes, frame_boxes, scores, labels = postprocess_detections(
-            out["detection"], (1.0, 1.0), (self.input_width, self.input_height)
+            detections, (1.0, 1.0), (self.input_width, self.input_height),
+            self.score_thresh, self.nms_iou, self.max_detections
         )
 
         masks = lane_logits.argmax(1)[0]
-        mask_whitelane = masks[0]
-        mask_yellow = masks[1]
-        mask_stopline = masks[2]
+        mask_whitelane = (masks == 1)
+        mask_yellow = (masks == 2)
+        mask_stopline = (masks == 3)
 
-        mask_whitelane[:] = mask_whitelane[::self.subsample_step]
-        mask_yellow[:] = mask_yellow[::self.subsample_step]
-        mask_stopline[:] = mask_stopline[::self.subsample_step]
+        mask_whitelane = mask_whitelane[::self.subsample_step, ::self.subsample_step]
+        mask_yellow = mask_yellow[::self.subsample_step, ::self.subsample_step]
+        mask_stopline = mask_stopline[::self.subsample_step, ::self.subsample_step]
 
         def leading_edge_extraction(mask):
             H, W = mask.shape
-            flipped_mask = mask[::-1, :]
-            has_edge = np.any(flipped_mask, axis=0)
-            idx = np.argmax(flipped_mask, axis=0)
+            flipped_mask = torch.flip(mask, dims=[0])
+            has_edge = flipped_mask.any(dim=0)
+            idx = flipped_mask.to(torch.int8).argmax(dim=0)
             v_sub = (H - 1) - idx
-            u_sub = np.arange(W)
+            u_sub = torch.arange(W, device=mask.device)
             return v_sub[has_edge], u_sub[has_edge]
 
         v_sub_whitelane, u_sub_whitelane = leading_edge_extraction(mask_whitelane)
@@ -180,7 +205,7 @@ class Vision(Node):
             self.cx, self.cy, self.fx, self.fy, self.cam_pitch, self.cam_height
         )
 
-        v_sub_yellow, u_sub_yellow = np.nonzero(mask_yellow)
+        v_sub_yellow, u_sub_yellow = leading_edge_extraction(mask_yellow)
         pc_yellow = project_pixels_torch(
             v_sub_yellow, u_sub_yellow, self.subsample_step, self.pitch_bot,
             self.cx, self.cy, self.fx, self.fy, self.cam_pitch, self.cam_height
@@ -192,14 +217,18 @@ class Vision(Node):
             self.cx, self.cy, self.fx, self.fy, self.cam_pitch, self.cam_height
         )
 
-        self.pc_whitelane_pub_.publish(self.np_to_pc(pc_whitelane.cpu().numpy())) 
-        self.pc_yellowlane_pub_.publish(self.np_to_pc(pc_yellow.cpu().numpy()))
-        self.pc_stopline_pub_.publish(self.np_to_pc(pc_stopline.cpu().numpy()))
+        self.pc_whitelane_pub_.publish(self.np_to_pc(pc_whitelane.cpu().numpy(), header)) 
+        self.pc_yellowlane_pub_.publish(self.np_to_pc(pc_yellow.cpu().numpy(), header))
+        self.pc_stopline_pub_.publish(self.np_to_pc(pc_stopline.cpu().numpy(), header))
 
-
+        left_xy, right_xy = self.centerline_generator.generate_centerlines(pc_whitelane, pc_yellow)
+        left_path = self.xy_to_path(left_xy, header)
+        right_path = self.xy_to_path(right_xy, header)
+        self.left_centerline_pub_.publish(left_path)
+        self.right_centerline_pub_.publish(right_path)
         
         arr = DetectionArray()
-        arr.header = msg.header
+        arr.header = header
         for box, s, l in zip(frame_boxes, scores, labels):
             det = Detection2D()
             det.class_id = int(l)
@@ -230,14 +259,14 @@ class Vision(Node):
 
     # --- Helpers ---
 
-    def np_to_pc(self, pc_np):
+    def np_to_pc(self, pc_np, header):
         pc_fields = [
             PointField(name='x', offset=0, datatype=PointField.FLOAT32, count=1),
             PointField(name='y', offset=4, datatype=PointField.FLOAT32, count=1),
             PointField(name='z', offset=8, datatype=PointField.FLOAT32, count=1)
         ]
         msg = PointCloud2()
-        msg.header = self.header
+        msg.header = header
         msg.height = 1
         msg.width = pc_np.shape[0]
         msg.fields = pc_fields
@@ -247,3 +276,43 @@ class Vision(Node):
         msg.is_dense = True
         msg.data = pc_np.astype(np.float32).tobytes()
         return msg 
+
+    def xy_to_path(self, xy, header):
+        path = Path()
+        path.header = header
+
+        if xy is None or len(xy) == 0:
+            return path
+
+        if xy is not None:
+            xy = xy.cpu().numpy()
+            
+            for pt in xy:
+                pose = PoseStamped()
+                pose.header = header
+                pose.pose.position.x = float(pt[0])
+                pose.pose.position.y = float(pt[1])
+                pose.pose.position.z = 0.0
+                pose.pose.orientation.w = 1.0 
+                path.poses.append(pose)
+        
+        return path
+
+
+def main(args=None):
+    rclpy.init(args=args)
+    node = Vision()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        try:
+            node.destroy_node()
+        except Exception:
+            pass
+        if rclpy.ok():
+            rclpy.shutdown()
+
+if __name__ == '__main__':
+    main()

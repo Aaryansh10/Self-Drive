@@ -4,7 +4,7 @@ import torch
 def project_pixels_np(
     v_sub, u_sub, subsample_step, bot_pitch,
     cx, cy, fx, fy, cam_pitch, cam_height, 
-    min_angle=0.01, max_range=7.5
+    min_angle=0.01, max_range=15.0
 ):
     N = v_sub.size
     if N == 0:
@@ -52,7 +52,7 @@ def project_pixels_np(
 def project_pixels_torch(
     v_sub, u_sub, subsample_step, bot_pitch,
     cx, cy, fx, fy, cam_pitch, cam_height, 
-    min_angle=0.01, max_range=7.5
+    min_angle=0.01, max_range=15.0, cam_x=0.02
 ):
     N = v_sub.numel()
     if N == 0:
@@ -90,7 +90,7 @@ def project_pixels_torch(
     point_cloud[:, 0] = range_fwd_dist
     point_cloud[:, 1] = cx - range_u
     point_cloud[:, 1] /= fx
-    point_cloud[:, 1] *= range_fwd_dist
+    point_cloud[:, 1] *= range_fwd_dist + cam_x
     point_cloud[:, 1] *= torch.cos(range_alpha)
     point_cloud[:, 1] /= torch.cos(range_angles)
     point_cloud[:, 2] = 0.0

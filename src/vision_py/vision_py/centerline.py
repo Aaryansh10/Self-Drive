@@ -4,19 +4,25 @@ import math
 import torch.nn.functional as F
 
 class CenterlineGenerator():
+
+    WHITE_LEFT = (('left', 0.25, True, 'near'), ('right', 0.75, True, 'far'))
+    WHITE_RIGHT = (('right', 0.25, False, 'near'), ('left', 0.75, False, 'far'))
+    YELLOW = (('left', 0.25, False, 'yellow'), ('right', 0.25, True, 'yellow'))
+
     def __init__(
-        self, max_gap, device, bin_width, max_bins,
-        max_bad_frame_streak, max_range, nominal_road_width, 
-        min_road_width, max_road_width, min_bin_points, 
-        max_width_update, max_sg_window_size, min_sg_window_size,
-        normal_blend_tx_min, normal_blend_tx_max, min_offset_fraction,
-        yellow_gate_fraction, path_spacing, path_start, final_smooth_window,
-        
+        self, max_gap=1.0, device='cuda', bin_width=0.5, max_bad_frame_streak=20, 
+        max_range=15.0, nominal_road_width=8.5, min_road_width=7.5, 
+        max_road_width=9.5, min_bin_points=1, max_width_update=0.35, 
+        max_sg_window_size=11,  normal_blend_tx_min=0.15, normal_blend_tx_max=0.6, 
+        min_offset_fraction=0.5, yellow_gate_fraction=0.25, path_spacing=0.1, path_start=0.2, 
+        final_smooth_window=25, near_field_range=2.0, min_near_pts=2, 
+        width_stale_decay_frames=30, width_stale_decay_alpha=0.05, sg_polyorder=2,
+        track_ema_alpha=0.35, width_ema_alpha=0.15, centerline_ema_alpha=0.4,
+        width_update_max_x = 2.5
     ):
         self.max_gap = max_gap
         self.device = device
         self.bin_width = bin_width
-        self.max_bins = max_bins
         self.max_bad_frame_streak = max_bad_frame_streak
         self.max_range = max_range
         self.nominal_road_width = nominal_road_width
@@ -24,8 +30,9 @@ class CenterlineGenerator():
         self.max_road_width = max_road_width
         self.min_bin_points = min_bin_points
         self.max_width_update = max_width_update
+        self.width_stale_decay_frames = max(1, width_stale_decay_frames)
+        self.width_stale_decay_alpha = width_stale_decay_alpha
         self.max_sg_window_size = max_sg_window_size
-        self.min_sg_window_size = min_sg_window_size
         self.normal_blend_tx_min = normal_blend_tx_min
         self.normal_blend_tx_max = normal_blend_tx_max
         self.min_offset_fraction = min_offset_fraction
@@ -33,50 +40,71 @@ class CenterlineGenerator():
         self.path_spacing = path_spacing
         self.path_start = path_start
         self.final_smooth_window = final_smooth_window
+        self.near_field_range = near_field_range
+        self.min_near_pts = min_near_pts
+        self.track_ema_alpha = track_ema_alpha
+        self.width_ema_alpha = width_ema_alpha
+        self.centerline_ema_alpha = centerline_ema_alpha
+        self.width_update_max_x = width_update_max_x
 
         self.dtype = torch.float32
+        self.max_bins = int(math.ceil(max_range / bin_width))
         self.min_offset = nominal_road_width * self.min_offset_fraction
         self.num_out = int(math.ceil((max_range - path_start) / path_spacing)) + 1
         self.d_grid = torch.linspace(
             self.path_start, self.max_range, self.num_out, device=self.device, dtype=self.dtype
         )
+        self.sg_polyorder = max(1, sg_polyorder)
+        self.sg_min_window = self.sg_polyorder + 1
+        if self.sg_min_window % 2 == 0:
+            self.sg_min_window += 1
+        self.sg_window_max = max_sg_window_size + (1 - max_sg_window_size % 2)
+        self.sg_window_max = max(self.sg_window_max, self.sg_min_window)
+        self.sg_coeffs = {}
 
         self.reset_memory()
 
     # --- Entry point ---
     
     @torch.no_grad()
-    def generate_centerlines(self, pc_whitelane, pc_yellow = None):
+    def generate_centerlines(self, pc_whitelane, pc_yellow=None):
         near = {'left': [], 'right': []}
         far = {'left': [], 'right': []}
         yellow = {'left': [], 'right': []}
 
-        if pc_whitelane is None or pc_whitelane.shape[0] == 0:
-            return self.failed_frame()
+        if pc_whitelane is not None and pc_whitelane.shape[0] > 0:
+            pc_whitelane = torch.as_tensor(pc_whitelane).to(self.device, self.dtype)
+            x, y = pc_whitelane[:, 0], pc_whitelane[:, 1]
+            line_id, pts_per_line = self.split_lines(x, y)
 
-        x, y = pc_whitelane[:, 0], pc_whitelane[:, 1]
-        line_id, pts_per_line = self.split_lines(x, y)
-        
-        pt_dist_bin_width = self.get_dist_bin_width(x)
-        line_is_left = self.label_lines(y, line_id, pt_dist_bin_width, pts_per_line)
-        pt_is_left = line_is_left[line_id]
-        self.update_memory(y, pt_dist_bin_width, pt_is_left)
+            pt_dist_bin_width = self.get_dist_bin_width(x)
+            line_is_left = self.label_lines(y, line_id, pt_dist_bin_width, pts_per_line)
+            pt_is_left = line_is_left[line_id]
+            self.update_memory(y, pt_dist_bin_width, pt_is_left)
 
-        start = 0
-        for n, is_left in zip(pts_per_line.tolist(), line_is_left.tolist()):
-            candidates = self.line_centerline(
-                x[start:start + n], y[start:start + n],
-                self.WHITE_LEFT if line_is_left else self.WHITE_RIGHT
-            )
-            start += n
-            for lane, kind, centerline_x, centerline_y, radial_dist in (candidates or []):
-                (near if kind == 'near' else far)[lane].append(centerline_x, centerline_y, radial_dist)
+            start = 0
+            for n, is_left in zip(pts_per_line.tolist(), line_is_left.tolist()):
+                candidates = self.line_centerline(
+                    x[start:start + n], y[start:start + n],
+                    self.WHITE_LEFT if is_left else self.WHITE_RIGHT
+                )
+                start += n
+                for lane, kind, cx, cy, rd in (candidates or []):
+                    (near if kind == 'near' else far)[lane].append((cx, cy, rd))
 
         if (not near['left'] or not near['right']) and pc_yellow is not None and pc_yellow.shape[0] > 0:
+            pc_yellow = torch.as_tensor(pc_yellow).to(self.device, self.dtype)
             self.get_yellow_candidates(pc_yellow, yellow)
 
-        left_xy = self.fuse_side()
+        left_xy = self.fuse_side('left', self.select(near['left'], far['left'], yellow['left']))
+        right_xy = self.fuse_side('right', self.select(near['right'], far['right'], yellow['right']))
 
+        if left_xy is None and right_xy is None:
+            return self.failed_frame()
+
+        self.bad_frame_streak = 0
+        return left_xy, right_xy
+    
     # --- Memory update ---
 
     def failed_frame(self):
@@ -88,8 +116,10 @@ class CenterlineGenerator():
         return None, None
 
     def reset_memory(self):
+        # Resets all the memory of the tracked lanes
+
         nan = float('nan')
-        num_bins, num_out = self.num_bins, self.num_out
+        num_bins, num_out = self.max_bins, self.num_out
         kw = dict(device=self.device, dtype=self.dtype)
         
         self.prev_left_y = torch.full((num_bins,), nan, **kw)
@@ -128,12 +158,27 @@ class CenterlineGenerator():
 
         raw_road_width = left_mean - right_mean
         plausible = (raw_road_width >= self.min_road_width) & (raw_road_width <= self.max_road_width)
-        confirmed = left_has_enough & right_has_enough & plausible
+        bin_x = (torch.arange(self.max_bins, device=self.device, dtype=self.dtype) + 0.5) * self.bin_width
+        trusted = bin_x <= self.width_update_max_x
+        confirmed = left_has_enough & right_has_enough & plausible & trusted
 
         aw = self.width_ema_alpha
         target = aw * raw_road_width.clamp(self.min_road_width, self.max_road_width) + (1 - aw) * self.road_width 
         step = (target - self.road_width).clamp(-self.max_width_update, self.max_width_update)
         self.road_width = torch.where(confirmed, self.road_width + step, self.road_width)
+
+        self.width_stale = torch.where(
+            confirmed, torch.zeros_like(self.width_stale), self.width_stale + 1.0
+        )
+        stale = self.width_stale > self.width_stale_decay_frames
+        decayed = self.road_width + self.width_stale_decay_alpha * (
+            self.nominal_road_width - self.road_width
+        )
+        self.road_width = torch.where(stale, decayed, self.road_width)
+
+        fresh = trusted & (self.width_stale <= self.width_stale_decay_frames)
+        if bool(fresh.any()):
+            self.road_width = torch.where(~trusted, self.road_width[fresh].mean(), self.road_width)
 
     # --- Lane splitting and labelling ---
 
@@ -142,7 +187,7 @@ class CenterlineGenerator():
 
         dist_bw_points = torch.hypot(torch.diff(x), torch.diff(y))
         new_line_starts = torch.cat((
-            torch.zeros(1, dtype=self.dtype, device=self.device), 
+            torch.ones(1, dtype=torch.bool, device=self.device), 
             dist_bw_points > self.max_gap
         ))
         line_id = torch.cumsum(new_line_starts, dim=0) - 1
@@ -151,14 +196,14 @@ class CenterlineGenerator():
 
     def get_dist_bin_width(self, x):
         # Calculates and returns the distance of each point in terms of bin width
-        return torch.clamp(x / self.bin_width, 0, self.max_bins - 1)
+        return torch.clamp((x / self.bin_width).to(torch.int64), 0, self.max_bins - 1)
 
     def label_lines(self, y, line_id, pt_dist_bin_width, pts_per_line):
         # Finds out and returns if a line is left by majority voting of the bins of each line
         
         prev_left_y = self.prev_left_y[pt_dist_bin_width]
         prev_right_y = self.prev_right_y[pt_dist_bin_width]
-        road_width = self.road_width
+        road_width = self.road_width[pt_dist_bin_width]
 
         unknown_left = torch.isnan(prev_left_y)
         unknown_right = torch.isnan(prev_right_y)
@@ -175,7 +220,7 @@ class CenterlineGenerator():
         pts_vote_left = torch.where(unknown_both, y > 0.0, closer_to_left)
 
         left_votes_per_line = torch.bincount(
-            line_id, weights=pts_vote_left, minlength=pts_per_line.numel()
+            line_id, weights=pts_vote_left.to(self.dtype), minlength=pts_per_line.numel()
         )
         line_is_left = (left_votes_per_line * 2) >= pts_per_line
         return line_is_left
@@ -193,11 +238,11 @@ class CenterlineGenerator():
             x = x.flip(0)
             y = y.flip(0)
 
-        window = min(n, self.max_sg_window_size)
+        window = min(n, self.sg_window_max)
         if window % 2 == 0:
             window -= 1
 
-        if window >= self.min_sg_window_size:
+        if window >= self.sg_min_window:
             x_smoothed = self.sg_apply(x, window, 0)
             y_smoothed = self.sg_apply(y, window, 0)
             tangent_x = self.sg_apply(x, window, 1)
@@ -220,7 +265,7 @@ class CenterlineGenerator():
 
         out = []
         for lane, fraction, toward_right, kind in offsets:
-            normal_x, normal_y = self.get_inward_normal()
+            normal_x, normal_y = self.get_inward_normal(tangent_x, tangent_y, toward_right)
             offset = torch.maximum(
                 road_w * fraction,
                 torch.full_like(road_w, self.min_offset * fraction)
@@ -257,7 +302,8 @@ class CenterlineGenerator():
                 x[start:start + n], y[start:start + n],
                 self.YELLOW 
             )
-            for lane, kind, centerline_x, centerline_y, radial_dist in (candidates, []):
+            start += n
+            for lane, kind, centerline_x, centerline_y, radial_dist in (candidates or []):
                 yellow[lane].append((centerline_x, centerline_y, radial_dist))
 
     def yellow_gate(self, x, y):
@@ -286,7 +332,7 @@ class CenterlineGenerator():
         return ~known | ((y - mid).abs() <= self.yellow_gate_fraction * width)
 
     def fuse_side(self, side, candidates):
-
+        # Creates and returns the final path by blending all the candidate paths
 
         if not candidates:
             return None
@@ -311,11 +357,60 @@ class CenterlineGenerator():
         x_mean = sum_x[valid_grid] / count[valid_grid]
         y_mean = sum_y[valid_grid] / count[valid_grid]
 
-        x_mean = self._box_smooth(x_mean, self.final_smooth_window)
-        y_mean = self._box_smooth(y_mean, self.final_smooth_window)
+        x_mean = self.box_smooth(x_mean, self.final_smooth_window)
+        y_mean = self.box_smooth(y_mean, self.final_smooth_window)
 
-        if int()
+        if int((x_mean < self.near_field_range).sum()) < self.min_near_pts:
+            return None
 
+        track = self.track[side]
+        prev_x = track[0][valid_grid]
+        prev_y = track[1][valid_grid]
+        has_prev = ~torch.isnan(prev_x)
+        
+        alpha = self.centerline_ema_alpha  
+        smoothed_x = torch.where(has_prev, alpha * x_mean + (1.0 - alpha) * prev_x, x_mean)
+        smoothed_y = torch.where(has_prev, alpha * y_mean + (1.0 - alpha) * prev_y, y_mean)
+
+        smoothed_x, smoothed_y = self.lock_near_field(smoothed_x, smoothed_y)
+        track[0][valid_grid] = smoothed_x
+        track[1][valid_grid] = smoothed_y
+        return torch.stack([smoothed_x, smoothed_y], dim=1)
+
+    def lock_near_field(self, smoothed_x, smoothed_y):
+        # Re-projects the first two points of the path to prevent hooks at turns, and returns the new path
+
+        if smoothed_x.numel() < 5:
+            return smoothed_x, smoothed_y
+
+        smoothed_x = smoothed_x.clone()
+        smoothed_y = smoothed_y.clone()
+
+        heading_x = smoothed_x[4] - smoothed_x[2]
+        heading_y = smoothed_y[4] - smoothed_y[2]
+
+        heading_norm = torch.hypot(heading_x, heading_y) + 1e-5
+        heading_x = heading_x / heading_norm
+        heading_y = heading_y / heading_norm
+
+        d0 = torch.hypot(smoothed_x[2] - smoothed_x[0], smoothed_y[2] - smoothed_y[0])
+        d1 = torch.hypot(smoothed_x[2] - smoothed_x[1], smoothed_y[2] - smoothed_y[1])
+
+        smoothed_x[0] = smoothed_x[2] - heading_x * d0
+        smoothed_y[0] = smoothed_y[2] - heading_y * d0
+        smoothed_x[1] = smoothed_x[2] - heading_x * d1
+        smoothed_y[1] = smoothed_y[2] - heading_y * d1
+
+        return smoothed_x, smoothed_y
+
+    def select(self, near, far, yellow):
+        # Selects and returns which lane to use
+
+        if near :
+            return near + far
+        if yellow:
+            return yellow
+        return far
 
     # --- Savitzky Golay ---
 
@@ -328,15 +423,15 @@ class CenterlineGenerator():
             return is_cached
 
         half = window // 2
-        idx = np.arange(-half, half + 1, np.float64)
+        idx = np.arange(-half, half + 1, dtype=np.float64)
         
         A = np.vander(idx, self.sg_polyorder + 1, increasing=True)
         coeffs = np.linalg.pinv(A)[deriv] * math.factorial(deriv)
         kernel = torch.as_tensor(
             coeffs.astype(np.float32), device=self.device
-        ).view
+        ).view(1, 1, -1)
 
-        self.find_sg_coeffs[key] = kernel
+        self.sg_coeffs[key] = kernel
         return kernel
 
     def sg_apply(self, arr, window, deriv):
@@ -389,7 +484,7 @@ class CenterlineGenerator():
     def interpolate(self, x_query, x_points, f_points):
         # Interpolates and returns the interpolated points
         
-        idx = torch.searchsorted(x_points, x_query).clamp(1, x_points.numel())
+        idx = torch.searchsorted(x_points, x_query).clamp(1, x_points.numel() - 1)
 
         x_left, x_right = x_points[idx - 1], x_points[idx]
         f_left, f_right = f_points[idx - 1], f_points[idx]

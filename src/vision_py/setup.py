@@ -6,6 +6,9 @@ setup(
     name=package_name,
     version='0.0.0',
     packages=find_packages(exclude=['test']),
+    package_data={
+        '': ['*.pt'],
+    },
     data_files=[
         ('share/ament_index/resource_index/packages',
             ['resource/' + package_name]),
@@ -26,6 +29,7 @@ setup(
         'console_scripts': [
             'vision_cv = vision_py.vision_cv:main',
             'model_output = vision_py.model_output:main',
+            'vision = vision_py.vision:main'
         ],
     },
 )
