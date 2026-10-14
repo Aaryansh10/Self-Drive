@@ -3,7 +3,7 @@
   <name>lane_change</name>
   <version>0.1.0</version>
   <description>Lane change action server (rclcpp)</description>
-  <maintainer email="you@example.com">Khushi</maintainer>
+  <maintainer email="sunandamishra0906@gmail.com">Sunanda</maintainer>
   <license>Apache-2.0</license>
   <buildtool_depend>ament_cmake</buildtool_depend>
   <depend>rclcpp</depend>
