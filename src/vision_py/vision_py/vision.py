@@ -222,8 +222,8 @@ class Vision(Node):
         self.pc_stopline_pub_.publish(self.np_to_pc(pc_stopline.cpu().numpy(), header))
 
         left_xy, right_xy = self.centerline_generator.generate_centerlines(pc_whitelane, pc_yellow)
-        left_path = self.xy_to_path(left_xy, header)
-        right_path = self.xy_to_path(right_xy, header)
+        left_path = self.xy_to_path(self.centerline_generator.anchor_to_origin(left_xy), header)
+        right_path = self.xy_to_path(self.centerline_generator.anchor_to_origin(right_xy), header)
         self.left_centerline_pub_.publish(left_path)
         self.right_centerline_pub_.publish(right_path)
         

@@ -13,12 +13,13 @@ class CenterlineGenerator():
         self, max_gap=1.0, device='cuda', bin_width=0.5, max_bad_frame_streak=20, 
         max_range=15.0, nominal_road_width=8.5, min_road_width=7.5, 
         max_road_width=9.5, min_bin_points=1, max_width_update=0.35, 
-        max_sg_window_size=11,  normal_blend_tx_min=0.15, normal_blend_tx_max=0.6, 
+        max_sg_window_size=11,  # unused: windows are now metric (position_window_m / tangent_window_m)
+        normal_blend_tx_min=None, normal_blend_tx_max=None, 
         min_offset_fraction=0.5, yellow_gate_fraction=0.25, path_spacing=0.1, path_start=0.2, 
         final_smooth_window=25, near_field_range=2.0, min_near_pts=2, 
         width_stale_decay_frames=30, width_stale_decay_alpha=0.05, sg_polyorder=2,
         track_ema_alpha=0.35, width_ema_alpha=0.15, centerline_ema_alpha=0.4,
-        width_update_max_x = 2.5
+        width_update_max_x = 2.5, resample_step=0.1, position_window_m=1.0, tangent_window_m=2.5
     ):
         self.max_gap = max_gap
         self.device = device
@@ -32,9 +33,12 @@ class CenterlineGenerator():
         self.max_width_update = max_width_update
         self.width_stale_decay_frames = max(1, width_stale_decay_frames)
         self.width_stale_decay_alpha = width_stale_decay_alpha
-        self.max_sg_window_size = max_sg_window_size
+        # Optional lateral-normal fallback. Disabled by default: vision.py declares
+        # these parameters but never applies them, and forcing a lateral offset when
+        # tangent_x is small points the offset the wrong way at bends.
         self.normal_blend_tx_min = normal_blend_tx_min
         self.normal_blend_tx_max = normal_blend_tx_max
+        self.use_normal_blend = normal_blend_tx_min is not None and normal_blend_tx_max is not None
         self.min_offset_fraction = min_offset_fraction
         self.yellow_gate_fraction = yellow_gate_fraction
         self.path_spacing = path_spacing
@@ -46,6 +50,9 @@ class CenterlineGenerator():
         self.width_ema_alpha = width_ema_alpha
         self.centerline_ema_alpha = centerline_ema_alpha
         self.width_update_max_x = width_update_max_x
+        self.resample_step = resample_step
+        self.position_window_m = position_window_m
+        self.tangent_window_m = tangent_window_m
 
         self.dtype = torch.float32
         self.max_bins = int(math.ceil(max_range / bin_width))
@@ -58,9 +65,9 @@ class CenterlineGenerator():
         self.sg_min_window = self.sg_polyorder + 1
         if self.sg_min_window % 2 == 0:
             self.sg_min_window += 1
-        self.sg_window_max = max_sg_window_size + (1 - max_sg_window_size % 2)
-        self.sg_window_max = max(self.sg_window_max, self.sg_min_window)
         self.sg_coeffs = {}
+        self.ref_fraction = 0.25      # smallest offset fraction in use; gets weight 1.0
+        self.taper_len = 1.0          # metres over which a candidate's weight ramps in/out
 
         self.reset_memory()
 
@@ -89,8 +96,8 @@ class CenterlineGenerator():
                     self.WHITE_LEFT if is_left else self.WHITE_RIGHT
                 )
                 start += n
-                for lane, kind, cx, cy, rd in (candidates or []):
-                    (near if kind == 'near' else far)[lane].append((cx, cy, rd))
+                for lane, kind, cx, cy, rd, frac in (candidates or []):
+                    (near if kind == 'near' else far)[lane].append((cx, cy, rd, frac))
 
         if (not near['left'] or not near['right']) and pc_yellow is not None and pc_yellow.shape[0] > 0:
             pc_yellow = torch.as_tensor(pc_yellow).to(self.device, self.dtype)
@@ -227,26 +234,54 @@ class CenterlineGenerator():
 
     # --- Centerline functions ---
 
+    def odd_window(self, meters, n):
+        # Converts a window length in metres to an odd sample count that fits in n samples
+        w = int(round(meters / self.resample_step))
+        w = min(w, n)
+        return w if w % 2 == 1 else w - 1
+
+    def resample_line(self, x, y):
+        # Resamples a line to uniform arclength spacing. The raw leading-edge points are one per
+        # image column: dense near the robot, sparse far away, and a staircase at range (one pixel
+        # row spans a lot of ground, so x stays constant while y steps). A fixed sample-count
+        # window then covers wildly different physical lengths; on a uniform grid it doesn't.
+
+        seg = torch.hypot(torch.diff(x), torch.diff(y))
+        arclen = torch.cat((torch.zeros(1, device=self.device, dtype=self.dtype), torch.cumsum(seg, 0)))
+        total = float(arclen[-1])
+        if total < 3 * self.resample_step:
+            return None
+        n = int(total / self.resample_step) + 1
+        query = torch.linspace(0.0, total, n, device=self.device, dtype=self.dtype)
+        return self.interpolate(query, arclen, x), self.interpolate(query, arclen, y)
+
     def line_centerline(self, x, y, offsets):
         # Generates and returns the centerline candidates by offseting using the normal vector
 
-        n = x.numel()
-        if n < 3:
+        if x.numel() < 3:
             return None
 
         if torch.hypot(x[0], y[0]) > torch.hypot(x[-1], y[-1]):
             x = x.flip(0)
             y = y.flip(0)
 
-        window = min(n, self.sg_window_max)
-        if window % 2 == 0:
-            window -= 1
+        resampled = self.resample_line(x.contiguous(), y.contiguous())
+        if resampled is None:
+            return None
+        x, y = resampled
+        n = x.numel()
 
-        if window >= self.sg_min_window:
-            x_smoothed = self.sg_apply(x, window, 0)
-            y_smoothed = self.sg_apply(y, window, 0)
-            tangent_x = self.sg_apply(x, window, 1)
-            tangent_y = self.sg_apply(y, window, 1)
+        # Position uses a short window; the tangent uses a longer one, because any tangent error
+        # is multiplied by the offset (up to ~0.75 * road width) when the path is pushed sideways.
+        wp = self.odd_window(self.position_window_m, n)
+        wt = self.odd_window(self.tangent_window_m, n)
+
+        if wt >= self.sg_min_window:
+            wp = max(wp, self.sg_min_window)
+            x_smoothed = self.sg_apply(x, wp, 0)
+            y_smoothed = self.sg_apply(y, wp, 0)
+            tangent_x = self.sg_apply(x, wt, 1)
+            tangent_y = self.sg_apply(y, wt, 1)
         else:
             w = min(7, n)
             if w % 2 == 0:
@@ -280,7 +315,7 @@ class CenterlineGenerator():
             radial_dist = radial_dist + torch.arange(
                 radial_dist.numel(), device=self.device, dtype=self.dtype
             ) * 1e-4
-            out.append((lane, kind, centerline_x, centerline_y, radial_dist))
+            out.append((lane, kind, centerline_x, centerline_y, radial_dist, fraction))
 
         return out
 
@@ -303,8 +338,8 @@ class CenterlineGenerator():
                 self.YELLOW 
             )
             start += n
-            for lane, kind, centerline_x, centerline_y, radial_dist in (candidates or []):
-                yellow[lane].append((centerline_x, centerline_y, radial_dist))
+            for lane, kind, centerline_x, centerline_y, radial_dist, frac in (candidates or []):
+                yellow[lane].append((centerline_x, centerline_y, radial_dist, frac))
 
     def yellow_gate(self, x, y):
         # Acts as a gate and returns a mask for those yellow points which are close to the center of the lane
@@ -339,26 +374,45 @@ class CenterlineGenerator():
 
         sum_x = torch.zeros_like(self.d_grid)
         sum_y = torch.zeros_like(self.d_grid)
-        count = torch.zeros_like(self.d_grid)
+        sum_w = torch.zeros_like(self.d_grid)
 
-        for candidate_x, candidate_y, radial_dist in candidates:
-            valid = (self.d_grid >= radial_dist[0]) & (self.d_grid <= radial_dist[-1])
+        for candidate_x, candidate_y, radial_dist, fraction in candidates:
+            lo, hi = radial_dist[0], radial_dist[-1]
+            valid = (self.d_grid >= lo) & (self.d_grid <= hi)
             if not bool(valid.any()):
                 continue
             dist_grid = self.d_grid[valid]
-            sum_x[valid] += self.interpolate(dist_grid, radial_dist, candidate_x)
-            sum_y[valid] += self.interpolate(dist_grid, radial_dist, candidate_y)
-            count[valid] += 1.0
 
-        valid_grid = count > 0
+            # Reliability weight. A candidate offset by `fraction` of the road width
+            # carries `fraction * width_error` of lateral error, so a 0.75 offset is
+            # 3x noisier than a 0.25 one. Weight by 1 / offset^2 (near/yellow = 1,
+            # far = 1/9) instead of averaging them equally.
+            w = (self.ref_fraction / max(fraction, 1e-3)) ** 2
+
+            # Ramp the weight in/out over the candidate's radial span so a candidate
+            # appearing or disappearing doesn't make the fused path jump. The floor
+            # keeps a sole candidate at full effect (weights cancel when normalised).
+            edge = torch.minimum(dist_grid - lo, hi - dist_grid)
+            ramp = (edge / self.taper_len).clamp(0.0, 1.0)
+            weight = w * (0.02 + 0.98 * ramp)
+
+            sum_x[valid] += weight * self.interpolate(dist_grid, radial_dist, candidate_x)
+            sum_y[valid] += weight * self.interpolate(dist_grid, radial_dist, candidate_y)
+            sum_w[valid] += weight
+
+        valid_grid = sum_w > 0
         if int(valid_grid.sum()) < 3:
             return None
 
-        x_mean = sum_x[valid_grid] / count[valid_grid]
-        y_mean = sum_y[valid_grid] / count[valid_grid]
+        x_mean = sum_x / sum_w.clamp(min=1e-9)
+        y_mean = sum_y / sum_w.clamp(min=1e-9)
 
-        x_mean = self.box_smooth(x_mean, self.final_smooth_window)
-        y_mean = self.box_smooth(y_mean, self.final_smooth_window)
+        # Smooth on the FULL uniform grid with a validity mask, then compact. The old
+        # code compacted first, so a gap in coverage got smoothed across as if the
+        # points on either side were neighbours, and the replicate padding dragged both
+        # ends of the path inward.
+        x_mean = self.masked_smooth(x_mean, valid_grid, self.final_smooth_window)[valid_grid]
+        y_mean = self.masked_smooth(y_mean, valid_grid, self.final_smooth_window)[valid_grid]
 
         if int((x_mean < self.near_field_range).sum()) < self.min_near_pts:
             return None
@@ -367,8 +421,8 @@ class CenterlineGenerator():
         prev_x = track[0][valid_grid]
         prev_y = track[1][valid_grid]
         has_prev = ~torch.isnan(prev_x)
-        
-        alpha = self.centerline_ema_alpha  
+
+        alpha = self.centerline_ema_alpha
         smoothed_x = torch.where(has_prev, alpha * x_mean + (1.0 - alpha) * prev_x, x_mean)
         smoothed_y = torch.where(has_prev, alpha * y_mean + (1.0 - alpha) * prev_y, y_mean)
 
@@ -376,6 +430,20 @@ class CenterlineGenerator():
         track[0][valid_grid] = smoothed_x
         track[1][valid_grid] = smoothed_y
         return torch.stack([smoothed_x, smoothed_y], dim=1)
+
+    def anchor_to_origin(self, path_xy, blend_dist=1.5):
+        # Optional helper (the equivalent of vision.py's _build_path_msg): prepends the robot origin
+        # and eases the lateral offset in over the first `blend_dist` metres with a cubic smoothstep,
+        # so a path that starts off-centre doesn't zig-zag diagonally out of (0, 0). Not called
+        # automatically, so generate_centerlines keeps returning the raw paths.
+
+        if path_xy is None or path_xy.shape[0] == 0:
+            return path_xy
+        origin = torch.zeros((1, 2), device=path_xy.device, dtype=path_xy.dtype)
+        anchored = torch.cat((origin, path_xy), dim=0).clone()
+        t = (anchored[:, 0] / blend_dist).clamp(0.0, 1.0)
+        anchored[:, 1] = anchored[:, 1] * (t * t * (3.0 - 2.0 * t))
+        return anchored
 
     def lock_near_field(self, smoothed_x, smoothed_y):
         # Re-projects the first two points of the path to prevent hooks at turns, and returns the new path
@@ -415,31 +483,60 @@ class CenterlineGenerator():
     # --- Savitzky Golay ---
 
     def find_sg_coeffs(self, window, deriv):
-        # Finds the Savitzky Golay coefficients and returns the kernel
+        # Returns (interior kernel, left-edge matrix, right-edge matrix) for a window/derivative.
+        # The edge matrices evaluate the polynomial fitted to the first/last `window` samples
+        # at the samples that do not have a full window around them. This replaces replicate
+        # padding, which flattens the slope at the ends of a line and rotates the tangent
+        # (and therefore the offset normal) there.
 
         key = window, deriv
-        is_cached = self.sg_coeffs.get(key)
-        if is_cached is not None:
-            return is_cached
+        cached = self.sg_coeffs.get(key)
+        if cached is not None:
+            return cached
 
         half = window // 2
         idx = np.arange(-half, half + 1, dtype=np.float64)
-        
-        A = np.vander(idx, self.sg_polyorder + 1, increasing=True)
-        coeffs = np.linalg.pinv(A)[deriv] * math.factorial(deriv)
-        kernel = torch.as_tensor(
-            coeffs.astype(np.float32), device=self.device
-        ).view(1, 1, -1)
+        order = self.sg_polyorder
 
-        self.sg_coeffs[key] = kernel
-        return kernel
+        A = np.vander(idx, order + 1, increasing=True)
+        pinv = np.linalg.pinv(A)                      # (order+1, window): samples -> poly coeffs
+        coeffs = pinv[deriv] * math.factorial(deriv)
+
+        def eval_rows(taus):
+            rows = []
+            for tau in taus:
+                if deriv == 0:
+                    rows.append([tau ** k for k in range(order + 1)])
+                else:
+                    rows.append([k * tau ** (k - 1) if k >= 1 else 0.0 for k in range(order + 1)])
+            return np.array(rows, dtype=np.float64)
+
+        # Slope at the ends comes from a straight-line fit (a quadratic extrapolated to the last
+        # sample is far too noisy, and the tangent error is multiplied by the lane offset).
+        edge_order = min(order, 1) if deriv == 1 else order
+        edge_pinv = np.linalg.pinv(np.vander(idx, edge_order + 1, increasing=True))
+        edge_pinv = np.pad(edge_pinv, ((0, order - edge_order), (0, 0)))  # zero higher coeffs
+
+        left = eval_rows(np.arange(-half, 0)) @ edge_pinv      # window centre is sample `half`
+        right = eval_rows(np.arange(1, half + 1)) @ edge_pinv  # window centre is sample L-1-half
+
+        to_t = lambda a: torch.as_tensor(a.astype(np.float32), device=self.device)
+        out = (to_t(coeffs).view(1, 1, -1), to_t(left), to_t(right))
+        self.sg_coeffs[key] = out
+        return out
 
     def sg_apply(self, arr, window, deriv):
-        # Applies the respective Savitzky Golay kernel and returns the result
+        # Applies the Savitzky Golay filter (value or slope) and returns the result.
+        # Requires arr.numel() >= window.
 
-        half = window // 2
-        padded = F.pad(arr.view(1, 1, -1), (half, half), mode='replicate')
-        return F.conv1d(padded, self.find_sg_coeffs(window, deriv)).view(-1)
+        kernel, left, right = self.find_sg_coeffs(window, deriv)
+        a = arr.contiguous()
+        interior = F.conv1d(a.view(1, 1, -1), kernel).view(-1)
+        if window < 3:
+            return interior
+        head = left @ a[:window]
+        tail = right @ a[-window:]
+        return torch.cat((head, interior, tail))
 
     # --- Low level helper functions ---
 
@@ -464,6 +561,35 @@ class CenterlineGenerator():
         padded = F.pad(arr.view(1, 1, -1), (pad, pad), mode='replicate')
         return F.avg_pool1d(padded, kernel_size=w, stride=1).view(-1)
 
+    def masked_smooth(self, values, valid, w):
+        # Windowed local-linear smoother on a uniform grid that ignores invalid samples.
+        # Interior samples get the plain box average (same as before); samples near a gap
+        # or an end of the path fit a line through the valid neighbours instead of being
+        # pulled toward the edge value.
+
+        w = min(w, int(valid.sum()))
+        if w % 2 == 0:
+            w -= 1
+        if w < 3:
+            return values
+
+        h = w // 2
+        v = valid.to(self.dtype)
+        val = torch.where(valid, values, torch.zeros_like(values))
+        t = torch.arange(-h, h + 1, device=self.device, dtype=self.dtype)
+
+        def corr(sig, kernel):
+            return F.conv1d(F.pad(sig.view(1, 1, -1), (h, h)), kernel.view(1, 1, -1)).view(-1)
+
+        one = torch.ones_like(t)
+        s0, s1, s2 = corr(v, one), corr(v, t), corr(v, t * t)
+        sv, stv = corr(val, one), corr(val, t)
+
+        det = s0 * s2 - s1 * s1
+        linear = (s2 * sv - s1 * stv) / det.clamp(min=1e-6)
+        box = sv / s0.clamp(min=1e-6)
+        return torch.where(det > 0.5, linear, box)
+
     def get_inward_normal(self, tangent_x, tangent_y, toward_right):
         # Calculares and returns the inward normal vector \
 
@@ -471,6 +597,9 @@ class CenterlineGenerator():
             g_normal_x, g_normal_y, lat_y = tangent_y, -tangent_x, -1.0
         else:
             g_normal_x, g_normal_y, lat_y = -tangent_y, tangent_x, 1.0
+
+        if not self.use_normal_blend:
+            return g_normal_x, g_normal_y
 
         span = max(self.normal_blend_tx_max - self.normal_blend_tx_min, 1e-6)
         w_geo = ((tangent_x - self.normal_blend_tx_min) / span).clamp(0.0, 1.0)

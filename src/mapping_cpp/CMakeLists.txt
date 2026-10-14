@@ -9,6 +9,9 @@ endif()
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(sensor_msgs REQUIRED)
+find_package(rclcpp_action REQUIRED)
+find_package(nav_msgs REQUIRED)
+find_package(nav2_msgs REQUIRED)
 
 if(BUILD_TESTING)
   find_package(ament_lint_auto REQUIRED)
@@ -17,7 +20,22 @@ if(BUILD_TESTING)
   ament_lint_auto_find_test_dependencies()
 endif()
 
-# Install directories into the share folder
+add_executable(path_bridge src/lane_follow_test.cpp)
+
+ament_target_dependencies(path_bridge
+  rclcpp
+  rclcpp_action
+  nav_msgs
+  nav2_msgs
+)
+
+# 1. Install the C++ executable target into lib/
+install(TARGETS
+  path_bridge
+  DESTINATION lib/${PROJECT_NAME}
+)
+
+# 2. Install launch and config directories into share/
 install(DIRECTORY
   launch
   config

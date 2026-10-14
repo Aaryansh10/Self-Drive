@@ -38,10 +38,19 @@ def generate_launch_description():
         parameters=[nav2_params_file, {'use_sim_time': use_sim_time}]
     )
 
+    velocity_smoother_node = Node(
+        package='nav2_velocity_smoother',
+        executable='velocity_smoother',
+        name='velocity_smoother',
+        output='screen',
+        parameters=[nav2_params_file, {'use_sim_time': use_sim_time}],
+    )
+
     return LaunchDescription([
         declare_use_sim_time_cmd,
         controller_server_node,
-        lifecycle_manager_node
+        lifecycle_manager_node,
+        velocity_smoother_node
     ])
 
 
