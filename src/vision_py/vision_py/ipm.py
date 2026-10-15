@@ -52,7 +52,7 @@ def project_pixels_np(
 def project_pixels_torch(
     v_sub, u_sub, subsample_step, bot_pitch,
     cx, cy, fx, fy, cam_pitch, cam_height, 
-    min_angle=0.01, max_range=15.0, cam_x=0.02
+    min_angle=0.01, max_range=8.0, cam_x=0.02
 ):
     N = v_sub.numel()
     if N == 0:

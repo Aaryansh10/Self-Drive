@@ -11,7 +11,7 @@ class CenterlineGenerator():
 
     def __init__(
         self, max_gap=1.0, device='cuda', bin_width=0.5, max_bad_frame_streak=20, 
-        max_range=15.0, nominal_road_width=7.4, min_road_width=6.6, 
+        max_range=8.0, nominal_road_width=7.4, min_road_width=6.6, 
         max_road_width=8.2, min_bin_points=1, max_width_update=0.35, 
         max_sg_window_size=11,  # unused: windows are now metric (position_window_m / tangent_window_m)
         normal_blend_tx_min=None, normal_blend_tx_max=None, 
