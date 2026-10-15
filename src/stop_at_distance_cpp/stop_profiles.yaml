@@ -1,0 +1,38 @@
+stop_action_server:
+  ros_parameters:
+    distance_topic: "/scan_distance"
+    odom_topic: "/odom"
+    cmd_vel_topic: "/cmd_vel"
+
+    control_rate_hz: 50.0
+    feedback_rate_hz: 10.0
+    mission_rate: 30.0
+
+    stop_speed_epsilon: 0.05
+    settle_threshold: 0.5
+    max_settle_time: 10.0
+    hold_duration: 0.5
+    abort_stop_timeout: 3.0
+
+    approach_gain: 0.5
+
+    profiles:
+      barrel:
+         min_distance: 0.3
+         max_distance: 0.9
+         max_spped: 2.2
+
+      stop_line:
+         min_distance: 0.05
+         max_distance: 0.3
+         max_spped: 2.2
+
+      mannequin:
+         min_distance: 1.5
+         max_distance: 2.1
+         max_spped: 2.2
+
+        
+
+
+
