@@ -11,15 +11,17 @@ class CenterlineGenerator():
 
     def __init__(
         self, max_gap=1.0, device='cuda', bin_width=0.5, max_bad_frame_streak=20, 
-        max_range=15.0, nominal_road_width=8.5, min_road_width=7.5, 
-        max_road_width=9.5, min_bin_points=1, max_width_update=0.35, 
+        max_range=15.0, nominal_road_width=7.4, min_road_width=6.6, 
+        max_road_width=8.2, min_bin_points=1, max_width_update=0.35, 
         max_sg_window_size=11,  # unused: windows are now metric (position_window_m / tangent_window_m)
         normal_blend_tx_min=None, normal_blend_tx_max=None, 
         min_offset_fraction=0.5, yellow_gate_fraction=0.25, path_spacing=0.1, path_start=0.2, 
         final_smooth_window=25, near_field_range=2.0, min_near_pts=2, 
         width_stale_decay_frames=30, width_stale_decay_alpha=0.05, sg_polyorder=2,
         track_ema_alpha=0.35, width_ema_alpha=0.15, centerline_ema_alpha=0.4,
-        width_update_max_x = 2.5, resample_step=0.1, position_window_m=1.0, tangent_window_m=2.5
+        width_update_max_x = 2.5, resample_step=0.1, position_window_m=1.0, tangent_window_m=2.5,
+        far_near_field_range=4.0, lane_change_bezier=True, lane_change_factor=2.5,
+        lane_change_min_len=3.0, bezier_handle=0.4
     ):
         self.max_gap = max_gap
         self.device = device
@@ -53,6 +55,15 @@ class CenterlineGenerator():
         self.resample_step = resample_step
         self.position_window_m = position_window_m
         self.tangent_window_m = tangent_window_m
+        # Far-lane paths are offset ~0.75 road widths sideways, so they never get close to the robot
+        # radially; they are allowed to start further out than same-lane paths.
+        self.far_near_field_range = far_near_field_range
+        # Bezier lane-change blending: the path leaves the robot along its heading (+x) and joins the
+        # lane centerline tangentially. Chord length = max(min_len, factor * lateral offset).
+        self.lane_change_bezier = lane_change_bezier
+        self.lane_change_factor = lane_change_factor
+        self.lane_change_min_len = lane_change_min_len
+        self.bezier_handle = bezier_handle
 
         self.dtype = torch.float32
         self.max_bins = int(math.ceil(max_range / bin_width))
@@ -110,6 +121,10 @@ class CenterlineGenerator():
             return self.failed_frame()
 
         self.bad_frame_streak = 0
+        if self.lane_change_bezier:
+            # Applied after fuse_side, so the tracked (EMA) memory stays raw
+            left_xy = self.bezier_lane_change(left_xy)
+            right_xy = self.bezier_lane_change(right_xy)
         return left_xy, right_xy
     
     # --- Memory update ---
@@ -414,7 +429,12 @@ class CenterlineGenerator():
         x_mean = self.masked_smooth(x_mean, valid_grid, self.final_smooth_window)[valid_grid]
         y_mean = self.masked_smooth(y_mean, valid_grid, self.final_smooth_window)[valid_grid]
 
-        if int((x_mean < self.near_field_range).sum()) < self.min_near_pts:
+        # The path has to start close to the robot in forward distance. This used to count grid points
+        # with x < near_field_range, but the grid is spaced in *radial* distance: a lane 3-6 m to the
+        # side packs only 1-3 samples into the first 2 m of x, so far-lane paths almost always failed.
+        has_close = any(c[3] <= self.ref_fraction + 1e-6 for c in candidates)
+        start_limit = self.near_field_range if has_close else self.far_near_field_range
+        if x_mean.numel() < self.min_near_pts or float(x_mean.min()) > start_limit:
             return None
 
         track = self.track[side]
@@ -431,19 +451,60 @@ class CenterlineGenerator():
         track[1][valid_grid] = smoothed_y
         return torch.stack([smoothed_x, smoothed_y], dim=1)
 
-    def anchor_to_origin(self, path_xy, blend_dist=1.5):
-        # Optional helper (the equivalent of vision.py's _build_path_msg): prepends the robot origin
-        # and eases the lateral offset in over the first `blend_dist` metres with a cubic smoothstep,
-        # so a path that starts off-centre doesn't zig-zag diagonally out of (0, 0). Not called
-        # automatically, so generate_centerlines keeps returning the raw paths.
+    def anchor_to_origin(self, path_xy, blend_dist=None):
+        # Kept for compatibility with vision.py. Now a Bezier lane-change blend (blend_dist unused);
+        # a no-op if the path already starts at the origin.
 
         if path_xy is None or path_xy.shape[0] == 0:
             return path_xy
-        origin = torch.zeros((1, 2), device=path_xy.device, dtype=path_xy.dtype)
-        anchored = torch.cat((origin, path_xy), dim=0).clone()
-        t = (anchored[:, 0] / blend_dist).clamp(0.0, 1.0)
-        anchored[:, 1] = anchored[:, 1] * (t * t * (3.0 - 2.0 * t))
-        return anchored
+        if float(torch.hypot(path_xy[0, 0], path_xy[0, 1])) < 1e-3:
+            return path_xy
+        return self.bezier_lane_change(path_xy)
+
+    def bezier_lane_change(self, path_xy):
+        # Replaces the start of the path with a cubic Bezier that leaves the origin along the robot
+        # heading (+x) and joins the lane centerline tangentially. The longer the lateral offset, the
+        # longer the transition, so an adjacent-lane path is reached with a gentle S-curve instead of
+        # a sharp jump. Returns a path starting at (0, 0).
+
+        if path_xy is None or path_xy.shape[0] < 3:
+            return path_xy
+
+        n = path_xy.shape[0]
+        x, y = path_xy[:, 0], path_xy[:, 1]
+        r = torch.hypot(x, y)
+
+        lateral = float(y[:min(n, 5)].abs().mean())
+        chord = max(self.lane_change_min_len, self.lane_change_factor * lateral)
+        chord = min(chord, 0.8 * float(r.max()))
+
+        ahead = torch.nonzero(r >= chord)
+        j = int(ahead[0]) if ahead.numel() > 0 else n - 1
+
+        k = 5
+        lo, hi = max(j - k, 0), min(j + k, n - 1)
+        tangent = path_xy[hi] - path_xy[lo]
+        tangent = tangent / tangent.norm().clamp(min=1e-6)
+
+        p0 = torch.zeros(2, device=path_xy.device, dtype=path_xy.dtype)
+        p3 = path_xy[j]
+        handle = self.bezier_handle * float(p3.norm())
+        heading = torch.tensor([1.0, 0.0], device=path_xy.device, dtype=path_xy.dtype)
+        p1 = p0 + handle * heading
+        p2 = p3 - handle * tangent
+
+        u = torch.linspace(0.0, 1.0, 200, device=path_xy.device, dtype=path_xy.dtype).unsqueeze(1)
+        bez = ((1 - u) ** 3) * p0 + 3 * ((1 - u) ** 2) * u * p1 + 3 * (1 - u) * (u ** 2) * p2 + (u ** 3) * p3
+
+        seg = torch.hypot(torch.diff(bez[:, 0]), torch.diff(bez[:, 1]))
+        arclen = torch.cat((seg.new_zeros(1), torch.cumsum(seg, 0)))
+        arclen = arclen + torch.arange(arclen.numel(), device=arclen.device, dtype=arclen.dtype) * 1e-7
+        m = max(int(float(arclen[-1]) / self.path_spacing) + 1, 2)
+        query = torch.linspace(0.0, float(arclen[-1]), m, device=arclen.device, dtype=arclen.dtype)
+        bx = self.interpolate(query, arclen, bez[:, 0])
+        by = self.interpolate(query, arclen, bez[:, 1])
+
+        return torch.cat((torch.stack((bx, by), dim=1)[:-1], path_xy[j:]), dim=0)
 
     def lock_near_field(self, smoothed_x, smoothed_y):
         # Re-projects the first two points of the path to prevent hooks at turns, and returns the new path
@@ -472,13 +533,12 @@ class CenterlineGenerator():
         return smoothed_x, smoothed_y
 
     def select(self, near, far, yellow):
-        # Selects and returns which lane to use
+        # Selects which candidates to fuse for a lane. The far candidate is no longer dropped when
+        # yellow exists; fuse_side already weights it 1/9 of a near/yellow candidate.
 
-        if near :
+        if near:
             return near + far
-        if yellow:
-            return yellow
-        return far
+        return yellow + far
 
     # --- Savitzky Golay ---
 
