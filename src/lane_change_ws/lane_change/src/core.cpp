@@ -23,7 +23,7 @@ std::string fmt(const char* f, double a, double b = 0.0, double c = 0.0) {
 }
 }  // namespace
 
-// --------------------------------------------------------------------------- smoother step
+// smoother step
 double smoother(double u) {
   if (u <= 0.0) return 0.0;
   if (u >= 1.0) return 1.0;
@@ -41,7 +41,7 @@ double smoother_inverse(double y) {
   return 0.5 * (lo + hi);
 }
 
-// --------------------------------------------------------------------------- Polyline
+//  Polyline
 bool Polyline::build(const Line& raw, double extend_back, double extend_fwd, double smooth) {
   pts_.clear();
   cum_.clear();
@@ -143,7 +143,7 @@ void Polyline::at(double s, Pt* p, Pt* t) const {
   }
 }
 
-// --------------------------------------------------------------------------- Maneuver
+//  Maneuver
 Line Maneuver::to_odom(const Line& b, const OdomIn& od) {
   Line o;
   o.reserve(b.size());
@@ -295,7 +295,7 @@ StepOut Maneuver::step(const OdomIn& od, const Line* fresh, double now) {
   double remaining = D0_ - p_total_;
   out.remaining_to_obstacle = remaining;
 
-  // ============================================================== WAITING
+  // WAITING
   if (phase_ == Phase::WAITING) {
     out.phase = phase_;
     if (now - t_goal_ > P_.wait_timeout)
@@ -346,7 +346,7 @@ StepOut Maneuver::step(const OdomIn& od, const Line* fresh, double now) {
     // fall through to CHANGING in the same step
   }
 
-  // ============================================================== CHANGING / SETTLING
+  // CHANGING / SETTLING
   if (now - t_change_ > P_.max_change_time) return fail(Code::TIMEOUT, "lane change took too long", out);
   if (!have_line) return fail(Code::NO_DATA, "no target-lane centreline", out);
   if (age > P_.lost_timeout) return fail(Code::LANE_LOST, "target-lane centreline lost", out);
