@@ -1,6 +1,7 @@
 import cv2
 import numpy as np
 import torch
+import torch.nn.functional as F
 from torchvision.ops import batched_nms
 
 def preprocess(
@@ -110,3 +111,62 @@ def postprocess_detections(det, scale_xy, frame_wh, score_thresh, nms_iou, max_d
         selected_scores.cpu().numpy(),
         labels.cpu().numpy(),
     )
+
+def dilate(mask, k):
+    return F.max_pool2d(mask, k, stride=1, padding=k // 2)
+
+def erode(mask, k):
+    return -F.max_pool2d(-mask, k, stride=1, padding=k // 2)
+
+def label_components(mask: torch.Tensor, max_iters: int = 48) -> torch.Tensor:
+    """
+    mask: (H, W) bool on GPU. Returns a flat float32 label map (H*W,), 0 = background.
+    Max-label propagation over 8-neighbours plus pointer jumping, which converges in
+    far fewer iterations than plain propagation, even on long lanes.
+    """
+    H, W = mask.shape
+    fg = mask.reshape(-1).float()
+    labels = torch.arange(1, H * W + 1, device=mask.device, dtype=torch.float32) * fg
+    zero = labels.new_zeros(1)
+    for _ in range(max_iters):
+        prev = labels
+        nb = F.max_pool2d(labels.view(1, 1, H, W), 3, 1, 1).view(-1) * fg
+        # jump: replace each label by the label of the pixel whose id it holds
+        labels = torch.cat([zero, nb])[nb.long()]
+        if torch.equal(labels, prev):
+            break
+    return labels
+
+def clean_mask(
+    mask: torch.Tensor,
+    open_k: int = 3,
+    close_k: int = 5,
+    min_area: int = 120,
+    min_perimeter: int = 40,
+) -> torch.Tensor:
+    """
+    mask: (H, W) bool on GPU, full resolution.
+    open -> close -> drop connected components with area < min_area or perimeter < min_perimeter.
+    """
+    H, W = mask.shape
+    m = mask[None, None].float()
+
+    if open_k > 1:                       # removes specks smaller than the kernel
+        m = dilate(erode(m, open_k), open_k)
+    if close_k > 1:                      # bridges small gaps in dashed or worn markings
+        m = erode(dilate(m, close_k), close_k)
+
+    mb = m[0, 0] > 0.5
+    if not mb.any():
+        return mb
+
+    labels = label_components(mb).long()
+    n = H * W + 1
+
+    boundary = mb & ~(erode(mb[None, None].float(), 3)[0, 0] > 0.5)
+    area = torch.bincount(labels, minlength=n)
+    perim = torch.bincount(labels[boundary.reshape(-1)], minlength=n)
+
+    keep = (area >= min_area) & (perim >= min_perimeter)
+    keep[0] = False
+    return keep[labels].view(H, W)

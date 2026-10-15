@@ -15,7 +15,7 @@ from cv_bridge import CvBridge
 from vision_py.architectures.hydra_net.model import build_hydranet
 from vision_py.centerline import CenterlineGenerator
 from vision_py.ipm import project_pixels_torch
-from vision_py.model_helpers import load_weights, preprocess, postprocess_detections
+from vision_py.model_helpers import load_weights, preprocess, postprocess_detections, clean_mask
 
 class Vision(Node):
     def __init__(self):
@@ -182,9 +182,9 @@ class Vision(Node):
         )
 
         masks = lane_logits.argmax(1)[0]
-        mask_whitelane = (masks == 1)
-        mask_yellow = (masks == 2)
-        mask_stopline = (masks == 3)
+        mask_whitelane = clean_mask((masks == 1))
+        mask_yellow = clean_mask((masks == 2))
+        mask_stopline = clean_mask((masks == 3))
 
         mask_whitelane = mask_whitelane[::self.subsample_step, ::self.subsample_step]
         mask_yellow = mask_yellow[::self.subsample_step, ::self.subsample_step]
