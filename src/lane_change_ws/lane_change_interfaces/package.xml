@@ -3,7 +3,7 @@
   <name>lane_change_interfaces</name>
   <version>0.1.0</version>
   <description>Action definitions for lane change</description>
-  <maintainer email="sunandamishra0906@gmail.com">Sunanda</maintainer>
+  <maintainer email="sunandamishra0906@gmail.com">Sunanda Mishra</maintainer>
   <license>Apache-2.0</license>
   <buildtool_depend>ament_cmake</buildtool_depend>
   <buildtool_depend>rosidl_default_generators</buildtool_depend>
