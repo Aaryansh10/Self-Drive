@@ -9,7 +9,7 @@ public:
 using FollowPath = nav2_msgs::action::FollowPath;
 using GoalHandleFollowPath = rclcpp_action::ClientGoalHandle<FollowPath>;
 
-PathBridge() : Node("path_bridge"), min_update_period(std::chrono::milliseconds(200))  {
+PathBridge() : Node("path_bridge"), min_update_period(std::chrono::milliseconds(1000))  {
             action_client_ = rclcpp_action::create_client<FollowPath>(this, "follow_path");
 
             last_update_time = this->now();

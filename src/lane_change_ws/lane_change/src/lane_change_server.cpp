@@ -1,7 +1,8 @@
 // lane_change_server: LaneChange action server that only flips the selected lane.
-//   lane 1 = RIGHT, lane 2 = LEFT (published as std_msgs/Int32, latched, on /lane_change/selected_lane)
+// lane 1 = RIGHT, lane 2 = LEFT (published as std_msgs/Int32, latched, on /lane_change/selected_lane)
 // It does not plan, transform, or drive anything. lane_path_mux does the path selection.
 // Goal fields (obstacle_distance, completion_distance, target_speed, target_lane_free) are accepted and ignored.
+
 #include <memory>
 #include <string>
 

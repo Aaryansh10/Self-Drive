@@ -11,3 +11,4 @@ lane_path_mux:
     left_centerline_topic: /path/left_centerline
     selected_centerline_topic: /path/selected_centerline
     selected_lane_topic: /lane_change/selected_lane
+    output_frame: odom

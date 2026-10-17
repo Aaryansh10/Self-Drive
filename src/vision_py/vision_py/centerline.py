@@ -16,7 +16,7 @@ class CenterlineGenerator():
         max_sg_window_size=11,  # unused: windows are now metric (position_window_m / tangent_window_m)
         normal_blend_tx_min=None, normal_blend_tx_max=None, 
         min_offset_fraction=0.5, yellow_gate_fraction=0.25, path_spacing=0.1, path_start=0.2, 
-        final_smooth_window=25, near_field_range=2.0, min_near_pts=2, 
+        final_smooth_window=25, near_field_range=3.5, min_near_pts=2, 
         width_stale_decay_frames=30, width_stale_decay_alpha=0.05, sg_polyorder=2,
         track_ema_alpha=0.35, width_ema_alpha=0.15, centerline_ema_alpha=0.4,
         width_update_max_x = 2.5, resample_step=0.1, position_window_m=1.0, tangent_window_m=2.5,
