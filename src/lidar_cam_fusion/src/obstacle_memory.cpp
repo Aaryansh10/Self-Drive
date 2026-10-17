@@ -23,7 +23,7 @@ struct Track {
     uint32_t id = 0;
     uint32_t class_id = 0;
     std::string class_name;
-    Eigen::Vector3d odom;
+    Eigen::Vector3d position_odom;
     int hits = 1;
     int age = 1;
     int misses = 0;
@@ -57,6 +57,10 @@ class ObstacleMemory : public rclcpp::Node {
 
     rclcpp::Subscription<det>::SharedPtr detection_sub;
     std::vector<Track> tracks;
+    int confirm_hits, confirm_window;
+    uint32_t next_id;
+
+
     static Eigen::Vector3d transform_point(const Eigen::Vector3d &point, const TransformStamped &transform) {
       geometry_msgs::msg::PointStamped point_in, point_out;
       point_in.point.x = point.x();
@@ -86,8 +90,10 @@ class ObstacleMemory : public rclcpp::Node {
 
     for (auto & track : tracks) {
       track.matched_this_frame = frame;
-      track.age_frames++;
+      track.age++;
     }
+
+    Eigen::Vector3d measurement = transform_point(Eigen::Vector3d(detection.p.x, detection.p.y, detection.p.z), odom_from_source);
 
     int best_index = -1;
     double best_distance = gate_base + (gate_range * detection.distance);
@@ -101,13 +107,37 @@ class ObstacleMemory : public rclcpp::Node {
       best_index = static_cast<int>(index);
     }
    }
+
+   if (best_index >= 0) {
+    Track & tracks = tracks[best_index];
+    double gain = std:max(1.0/(track.hits + 1.0) , 0.2);
+    track.position_odom += gain * (measurement - track.position_odom);
+    track.hits++;
+    track.misses = 0;
+    track.matched_this_frame = true;
+    track.consecutive_out_of_lane = detection.is_in_lane ? 0 : track.consecutive_out_of_lane + 1;
+
+    if (track.confirmed == false && track.hits >= confirm_hits && track.age <= confirm_window) {
+      track.confirmed = true;
+      track.id = next_id++;
+    }
+
+   
+   else if(detection.is_in_lane) {
+    Track track;
+    track.class_id = detection.class_id;
+    track.class_name = detection.class_name;
+    track.position_odom = measurement;
+    track.matched_this_frame = true;
+    tracks.push_back(track);
+   }
   }
 
 
 
 
    } 
-
+  }
 
 int main(int argc, char ** argv)
 {
