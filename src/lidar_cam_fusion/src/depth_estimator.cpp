@@ -126,10 +126,10 @@ std::string camera_frame;
     sensor_msgs::PointCloud2ConstIterator<float> iz(tc,"z");
 
     while (ix != ix.end()) {
-        ix++;
-        iy++;
-        iz++;
-        if (!std::isfinite(i*x) || !std::isfinite(*iy) || !std::isfinite(*iz) || *ix <= 0.1f)
+        ++ix;
+        ++iy;
+        ++iz;
+        if (!std::isfinite(*ix) || !std::isfinite(*iy) || !std::isfinite(*iz) || *ix <= 0.1f)
                 continue;
         depths.push_back(*ix);
 }
@@ -148,7 +148,7 @@ std::string camera_frame;
         tf2::Vector3 d = R * tf2::Vector3(1.0, -(u - cx) / fx, -(v - cy) / fy);
         if(d.z() > -1e-3)
         return false;
-        double t = (ground_z - origin_z())/d.z();
+        double t = (ground_z - origin.z())/d.z();
         if (t<=0.0 || t > max_ipm_range)
         return false;
         depth = static_cast<float>(t);
