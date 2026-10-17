@@ -19,3 +19,5 @@ src/Data/
 **/eval_out/
 **/label_check_sim/
 src/vision_py/vision_py/architectures/hydra_net/sim_finetuned_last.pt
+obj_local/
+src/vision_py/architectures/hydra_net/sim_finetuned_deep_last.pt
