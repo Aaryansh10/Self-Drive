@@ -25,3 +25,5 @@ src/vision_py/architectures/hydra_net/eval_out_deep/
 src/vision_py/architectures/hydra_net/eval_sim_out_deep/
 obj_local/
 src/vision_py/vision_py/architectures/hydra_net/sim_finetuned_last.pt
+obj_local/
+src/vision_py/architectures/hydra_net/sim_finetuned_deep_last.pt
