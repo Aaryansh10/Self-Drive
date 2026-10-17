@@ -4,6 +4,7 @@
 #include <memory>
 #include <functional>
 #include <string>
+#include <unordered_set>
 #include "rclcpp/rclcpp.hpp"
 #include "sensor_msgs/msg/camera_info.hpp"
 #include "sensor_msgs/point_cloud2_iterator.hpp"
@@ -19,6 +20,9 @@
 #include "tf2/exceptions.h"
 #include "tf2_ros/buffer.h"
 #include "tf2_ros/transform_listener.h"
+#include "tf2/LinearMath/Quaternion.h"
+#include "tf2/LinearMath/Matrix3x3.h"
+#include "tf2/LinearMath/Vector3.h"
 #include "tf2_sensor_msgs/tf2_sensor_msgs.hpp"
 
 using det = vision_interfaces::msg::DetectionArray;
@@ -27,23 +31,49 @@ using pol = message_filters::sync_policies::ApproximateTime<det, cl>;
 using out = fusion_interfaces::msg::DetectionDistanceArray;
 
 class Fusion : public rclcpp::Node {
-    public:
+    public: 
     Fusion() : Node("depth_estimator"), tf_buffer(this->get_clock()), tf_listener(tf_buffer){
+
+        //parameters
+        auto flat = declare_parameter<std::vector<std::string>>("ipm_classes", std::vector<std::string>{"pothole", "tyre"});
+        ipm_classes.insert(flat.begin(), flat.end());
+        stop_sign_class      = this->declare_parameter<std::string>("stop_sign_class", "sign");
+        stop_line_max_age    = this->declare_parameter<double>("stop_line_max_age", 0.5); 
+        stop_line_min_points = this->declare_parameter<int>("stop_line_min_points", 5);
+        stop_line_percentile = this->declare_parameter<double>("stop_line_percentile", 0.1); 
+        ground_frame  = declare_parameter<std::string>("ground_frame", "link_base");
+        ground_z      = declare_parameter<double>("ground_z", 0.0);       
+        max_ipm_range = declare_parameter<double>("max_ipm_range", 40.0); 
+
+        //publishers and subscriptions
         camera_subscription = this->create_subscription<sensor_msgs::msg::CameraInfo>("zed_node/monocamera/camera_info", rclcpp::SensorDataQoS(), std::bind(&Fusion::camera_callback, this, std::placeholders::_1));
         cloud_subscription.subscribe(this, "obstacle_cloud", rmw_qos_profile_sensor_data);
         detection_subscription.subscribe(this, "detections", rmw_qos_profile_sensor_data);
+        stop_line_subscription = this->create_subscription<cl>("pc_stopline", rclcpp::SensorDataQoS(), std::bind(&Fusion::stop_line_callback, this, std::placeholders::_1));
         sync = std::make_shared<message_filters::Synchronizer<pol>>(pol(10),detection_subscription,cloud_subscription);
         sync->setMaxIntervalDuration(rclcpp::Duration::from_seconds(0.1));
         sync->registerCallback(&Fusion::fusion_callback, this);
         distance_publisher = this->create_publisher<out>("detected_distance", 10);
     }
     
-    private:      
+    private: 
     double fx = 0.0;
     double fy = 0.0;
     double cx = 0.0;
     double cy = 0.0;
     bool ok = false;
+    std::unordered_set<std::string> ipm_classes;
+    std::string ground_frame;
+    double ground_z = 0, max_ipm_range = 40;
+    std::string stop_sign_class = "stop_sign";
+    int stop_line_min_points = 5;
+    double stop_line_percentile = 0.1;
+    double stop_line_max_age = 0.5;
+    rclcpp::Subscription<cl>::SharedPtr stop_line_subscription;
+    bool stop_line_valid = false;
+    float stop_line_dist = 0.0f;
+    size_t stop_line_n = 0;
+    rclcpp::Time stop_line_stamp;
         
 rclcpp::Subscription<sensor_msgs::msg::CameraInfo>::SharedPtr camera_subscription;
 message_filters::Subscriber<det> detection_subscription;
@@ -64,7 +94,7 @@ std::string camera_frame;
      RCLCPP_INFO(this->get_logger(), "Received camera info");
    }
 
-    /*void cloud_callback(const sensor_msgs::msg::PointCloud2::SharedPtr msg){
+   /*void cloud_callback(const sensor_msgs::msg::PointCloud2::SharedPtr msg){
         RCLCPP_INFO(this->get_logger(),"Received a LiDAR point cloud");
         }
 
@@ -72,6 +102,58 @@ std::string camera_frame;
         RCLCPP_INFO(this->get_logger(),"Received object detections",msg->detections.size);
 
     }*/
+
+    void stop_line_callback(const cl::SharedPtr cloud) {
+        if(ok == false){
+        RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000, "Did not receive camera info");
+        return;
+    }
+    geometry_msgs::msg::TransformStamped tf;
+
+    try {
+    tf = tf_buffer.lookupTransform(camera_frame, cloud->header.frame_id, tf2::TimePointZero);
+    }
+    catch(const tf2::TransformException & e) {
+        RCLCPP_WARN(this->get_logger(), "Stop line transform failed: %s", e.what());
+        return;
+    }
+
+    cl tc;
+    tf2::doTransform(*cloud, tc, tf);
+    std::vector<float> depths;
+    sensor_msgs::PointCloud2ConstIterator<float> ix(tc,"x");
+    sensor_msgs::PointCloud2ConstIterator<float> iy(tc,"y");
+    sensor_msgs::PointCloud2ConstIterator<float> iz(tc,"z");
+
+    while (ix != ix.end()) {
+        ix++;
+        iy++;
+        iz++;
+        if (!std::isfinite(i*x) || !std::isfinite(*iy) || !std::isfinite(*iz) || *ix <= 0.1f)
+                continue;
+        depths.push_back(*ix);
+}
+
+    stop_line_n = depths.size();
+    stop_line_valid = depths.size() >= static_cast<size_t>(stop_line_min_points);
+    stop_line_stamp = rclcpp::Time(cloud->header.stamp);
+    if(stop_line_valid){
+        size_t index = static_cast<size_t>(depths.size() * stop_line_percentile);
+        std::nth_element(depths.begin(), depths.begin()+index, depths.end());
+        stop_line_dist = depths[index];
+    }
+    }
+
+    bool ipm_depth(double u, double v, const::tf2::Vector3 &origin, const::tf2::Matrix3x3 &R, float &depth) {
+        tf2::Vector3 d = R * tf2::Vector3(1.0, -(u - cx) / fx, -(v - cy) / fy);
+        if(d.z() > -1e-3)
+        return false;
+        double t = (ground_z - origin_z())/d.z();
+        if (t<=0.0 || t > max_ipm_range)
+        return false;
+        depth = static_cast<float>(t);
+        return true;
+    }
 
     void fusion_callback(const det::ConstSharedPtr &detections, const cl::ConstSharedPtr &cloud)
 {
@@ -92,46 +174,63 @@ std::string camera_frame;
 
     cl transformed_cloud;
     tf2::doTransform(*cloud, transformed_cloud, transform);
+   
+    bool have_ground = false;
+    tf2::Vector3 ipm_origin;
+    tf2::Matrix3x3 ipm_R;
 
-    /*{
-    size_t n = 0, f = 0, m = 0;
-    sensor_msgs::PointCloud2ConstIterator<float> a(transformed_cloud, "x");
-    sensor_msgs::PointCloud2ConstIterator<float> b(transformed_cloud, "y");
-    sensor_msgs::PointCloud2ConstIterator<float> c(transformed_cloud, "z");
-    for (; a != a.end(); ++a, ++b, ++c) {
-        n++;
-        if (!std::isfinite(*c) || *c <= 0.1f) continue;
-        f++;
-        float u = fx * *a / *c + cx;
-        float v = fy * *b / *c + cy;
-        if (u >= 0 && u <= 2 * cx && v >= 0 && v <= 2 * cy) m++;
+    try {
+        auto ground = tf_buffer.lookupTransform(ground_frame, camera_frame, tf2::TimePointZero);
+        const auto &q = ground.transform.rotation;
+        const auto &t = ground.transform.translation;
+        ipm_R = tf2::Matrix3x3(tf2::Quaternion(q.x, q.y, q.z, q.w));
+        ipm_origin = tf2::Vector3(t.x, t.y, t.z);
+        have_ground = true;
     }
-    RCLCPP_INFO(this->get_logger(),
-        "frame=%s total=%zu front=%zu in_img=%zu cx=%.0f cy=%.0f",
-        camera_frame.c_str(), n, f, m, cx, cy);
-    for (const auto &d : detections->detections) {
-        RCLCPP_INFO(this->get_logger(), "box x1=%.0f y1=%.0f x2=%.0f y2=%.0f",
-            d.x1, d.y1, d.x2, d.y2);
+    catch(const tf2::TransformException &e) {
+        RCLCPP_WARN(this->get_logger(), "Ground transform failed: %s", e.what());
+        return;
     }
-    
-    }
-
-    {
-    size_t k = 0;
-    sensor_msgs::PointCloud2ConstIterator<float> a(transformed_cloud, "x");
-    sensor_msgs::PointCloud2ConstIterator<float> b(transformed_cloud, "y");
-    sensor_msgs::PointCloud2ConstIterator<float> c(transformed_cloud, "z");
-    for (; a != a.end() && k < 5; ++a, ++b, ++c, ++k) {
-        RCLCPP_INFO(this->get_logger(), "pt x=%.2f y=%.2f z=%.2f u=%.0f v=%.0f",
-            *a, *b, *c, fx * *a / *c + cx, fy * *b / *c + cy);
-    }
-    }
-*/
 
     out output;
     output.header = detections->header;
 
     for (const auto &b : detections->detections) {
+        
+        fusion_interfaces::msg::DetectionDistance result;
+
+        result.class_id = b.class_id;
+        result.class_name = b.class_name;
+        result.score = b.score;
+
+        if(b.class_name == stop_sign_class) {
+            result.n_pts = stop_line_n;
+            result.valid = false;
+            double age = std::fabs((rclcpp::Time(detections->header.stamp) - stop_line_stamp).seconds());
+            if (stop_line_valid && age <= stop_line_max_age) {
+                result.distance = stop_line_dist;
+                result.valid = true;
+            }
+            output.items.push_back(result);
+            continue;
+        }
+
+        if(ipm_classes.count(b.class_name)) {
+            result.n_pts = 0;
+            result.valid = false;
+            if (have_ground) {
+                float depth = 0.0f;
+                double u = 0.5 * (b.x1 + b.x2);
+                double v = 0.5 * (b.y1 + b.y2);
+                if (ipm_depth(u,v,ipm_origin,ipm_R,depth)){
+                    result.distance = depth;
+                    result.valid = true;
+                }
+            }
+            output.items.push_back(result);
+            continue;
+        }
+
         std::vector<float> depths;
 
         sensor_msgs::PointCloud2ConstIterator<float> iter_x(
@@ -168,11 +267,6 @@ std::string camera_frame;
             ++iter_z;
         }
 
-        fusion_interfaces::msg::DetectionDistance result;
-
-        result.class_id = b.class_id;
-        result.class_name = b.class_name;
-        result.score = b.score;
         result.n_pts = depths.size();
         result.valid = depths.size() >= 3;
 
