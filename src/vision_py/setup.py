@@ -29,7 +29,8 @@ setup(
         'console_scripts': [
             'vision_cv = vision_py.vision_cv:main',
             'model_output = vision_py.model_output:main',
-            'vision = vision_py.vision:main'
+            'vision = vision_py.vision:main',
+            'vision_debug = vision_py.vision_debug:main'
         ],
     },
 )

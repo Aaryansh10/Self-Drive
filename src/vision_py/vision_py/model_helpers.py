@@ -141,8 +141,8 @@ def clean_mask(
     mask: torch.Tensor,
     open_k: int = 3,
     close_k: int = 5,
-    min_area: int = 120,
-    min_perimeter: int = 40,
+    min_area: int = 150,
+    min_perimeter: int = 50,
 ) -> torch.Tensor:
     """
     mask: (H, W) bool on GPU, full resolution.

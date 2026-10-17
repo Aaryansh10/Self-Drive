@@ -12,14 +12,14 @@ class CenterlineGenerator():
     def __init__(
         self, max_gap=1.0, device='cuda', bin_width=0.5, max_bad_frame_streak=20, 
         max_range=8.0, nominal_road_width=7.4, min_road_width=6.6, 
-        max_road_width=8.2, min_bin_points=1, max_width_update=0.35, 
+        max_road_width=8.2, min_bin_points=1, max_width_update=0.5, 
         max_sg_window_size=11,  # unused: windows are now metric (position_window_m / tangent_window_m)
         normal_blend_tx_min=None, normal_blend_tx_max=None, 
         min_offset_fraction=0.5, yellow_gate_fraction=0.25, path_spacing=0.1, path_start=0.2, 
-        final_smooth_window=25, near_field_range=2.0, min_near_pts=2, 
+        final_smooth_window=25, near_field_range=3.5, min_near_pts=2, 
         width_stale_decay_frames=30, width_stale_decay_alpha=0.05, sg_polyorder=2,
         track_ema_alpha=0.35, width_ema_alpha=0.15, centerline_ema_alpha=0.4,
-        width_update_max_x = 2.5, resample_step=0.1, position_window_m=1.0, tangent_window_m=2.5,
+        width_update_max_x = 4.0, resample_step=0.1, position_window_m=1.0, tangent_window_m=2.5,
         far_near_field_range=4.0, lane_change_bezier=True, lane_change_factor=2.5,
         lane_change_min_len=3.0, bezier_handle=0.4
     ):
@@ -193,9 +193,7 @@ class CenterlineGenerator():
             confirmed, torch.zeros_like(self.width_stale), self.width_stale + 1.0
         )
         stale = self.width_stale > self.width_stale_decay_frames
-        decayed = self.road_width + self.width_stale_decay_alpha * (
-            self.nominal_road_width - self.road_width
-        )
+        decayed = self.road_width + self.width_stale_decay_alpha * (self.nominal_road_width - self.road_width)
         self.road_width = torch.where(stale, decayed, self.road_width)
 
         fresh = trusted & (self.width_stale <= self.width_stale_decay_frames)
@@ -245,7 +243,7 @@ class CenterlineGenerator():
             line_id, weights=pts_vote_left.to(self.dtype), minlength=pts_per_line.numel()
         )
         line_is_left = (left_votes_per_line * 2) >= pts_per_line
-        return line_is_left
+        return line_is_left # (l-1) entries where l is the number of lines
 
     # --- Centerline functions ---
 
