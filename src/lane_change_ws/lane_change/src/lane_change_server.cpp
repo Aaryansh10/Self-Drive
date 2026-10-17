@@ -24,7 +24,7 @@ class LaneChangeServer : public rclcpp::Node {
  public:
   LaneChangeServer() : Node("lane_change_server") {
     const auto topic = declare_parameter<std::string>("selected_lane_topic", "/lane_change/selected_lane");
-    lane_ = declare_parameter<std::string>("initial_lane", "right") == "left" ? kLeft : kRight;
+    lane_ = declare_parameter<std::string>("initial_lane", "left") == "left" ? kLeft : kRight;
 
     pub_ = create_publisher<std_msgs::msg::Int32>(topic, rclcpp::QoS(1).reliable().transient_local());
     publish_lane();
