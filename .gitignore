@@ -23,4 +23,4 @@ src/Data/
 *.pt
 src/vision_py/architectures/hydra_net/eval_out_deep/
 src/vision_py/architectures/hydra_net/eval_sim_out_deep/
-obj_local
+obj_local/

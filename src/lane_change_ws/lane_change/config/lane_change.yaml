@@ -1,0 +1,14 @@
+# Lane numbering everywhere: 1 = RIGHT = /path/right_centerline, 2 = LEFT = /path/left_centerline
+lane_change_server:
+  ros__parameters:
+    initial_lane: left                              # right | left
+    selected_lane_topic: /lane_change/selected_lane  # std_msgs/Int32 (1 right, 2 left), latched
+
+lane_path_mux:
+  ros__parameters:
+    initial_lane: left                              # used until the server's latched lane arrives (keep equal to the server's)
+    right_centerline_topic: /path/right_centerline
+    left_centerline_topic: /path/left_centerline
+    selected_centerline_topic: /path/selected_centerline
+    selected_lane_topic: /lane_change/selected_lane
+    output_frame: odom
