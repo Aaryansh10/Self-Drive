@@ -10,4 +10,5 @@
 
 #### Process:
 * It first splits the points in the point cloud into separate lines, by assigning it a line id. This is done on the basis of the euclidean distances between the points: if the distance is beyond a certain threshold then it marks the point as the starting point of a new line.
-* It then bins the 
+* It then bins the points of the point cloud based on the forward distance (x).
+* 

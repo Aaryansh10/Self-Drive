@@ -12,6 +12,7 @@ find_package(sensor_msgs REQUIRED)
 find_package(rclcpp_action REQUIRED)
 find_package(nav_msgs REQUIRED)
 find_package(nav2_msgs REQUIRED)
+find_package(pcl REQUIRED)
 
 if(BUILD_TESTING)
   find_package(ament_lint_auto REQUIRED)
@@ -27,6 +28,7 @@ ament_target_dependencies(path_bridge
   rclcpp_action
   nav_msgs
   nav2_msgs
+  pcl
 )
 
 # 1. Install the C++ executable target into lib/

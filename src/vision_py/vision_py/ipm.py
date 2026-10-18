@@ -4,7 +4,7 @@ import torch
 def project_pixels_np(
     v_sub, u_sub, subsample_step, bot_pitch,
     cx, cy, fx, fy, cam_pitch, cam_height, 
-    min_angle=0.01, max_range=15.0
+    min_angle=0.01, max_range=15.0, cam_x=0.02
 ):
     N = v_sub.size
     if N == 0:
@@ -14,7 +14,7 @@ def project_pixels_np(
     u_full = u_sub * subsample_step
 
     alpha = np.arctan((v_full - cy) / fy)
-    angles = alpha + cam_pitch - bot_pitch
+    angles = alpha + cam_pitch + bot_pitch
 
     ground_mask = angles >= min_angle
     valid_idx = np.nonzero(ground_mask)[0]
@@ -39,7 +39,7 @@ def project_pixels_np(
     range_fwd_dist = fwd_dist[range_idx]
 
     point_cloud = np.zeros((range_N, 3))
-    point_cloud[:, 0] = range_fwd_dist
+    point_cloud[:, 0] = range_fwd_dist + cam_x
     point_cloud[:, 1] = cx - range_u
     point_cloud[:, 1] /= fx
     point_cloud[:, 1] *= range_fwd_dist
@@ -62,7 +62,7 @@ def project_pixels_torch(
     u_full = u_sub * subsample_step
 
     alpha = torch.atan((v_full - cy) / fy)
-    angles = alpha + cam_pitch - bot_pitch
+    angles = alpha + cam_pitch + bot_pitch
 
     ground_mask = angles >= min_angle
     valid_idx = torch.where(ground_mask)[0]
@@ -87,10 +87,10 @@ def project_pixels_torch(
     range_fwd_dist = fwd_dist[range_idx]
 
     point_cloud = torch.zeros((range_N, 3), device=v_sub.device)
-    point_cloud[:, 0] = range_fwd_dist
+    point_cloud[:, 0] = range_fwd_dist + cam_x
     point_cloud[:, 1] = cx - range_u
     point_cloud[:, 1] /= fx
-    point_cloud[:, 1] *= range_fwd_dist + cam_x
+    point_cloud[:, 1] *= range_fwd_dist
     point_cloud[:, 1] *= torch.cos(range_alpha)
     point_cloud[:, 1] /= torch.cos(range_angles)
     point_cloud[:, 2] = 0.0
