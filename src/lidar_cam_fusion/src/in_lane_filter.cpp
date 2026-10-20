@@ -193,6 +193,12 @@ class InLaneFilter : public rclcpp::Node {
                 source_point.point = item.position;
                 tf2::doTransform(source_point, target_point, g);
                 r = check(target_point.point.x , target_point.point.y);
+                double y_white = 0, y_yellow = 0;
+                bool has_white = boundary(white, target_point.point.x, y_white);
+                bool has_yellow = boundary(yellow, target_point.point.x, y_yellow);
+                RCLCPP_INFO(get_logger(), "obj x=%.2f y=%.2f z=%.2f | white=%d %.2f yellow=%d %.2f -> %d",
+                target_point.point.x, target_point.point.y, target_point.point.z,
+                    has_white, y_white, has_yellow, y_yellow, static_cast<int>(r));
             }
             item.is_in_lane = (r == Lane::IN) || (r == Lane::UNKNOWN && in_lane_unknown);
         }
