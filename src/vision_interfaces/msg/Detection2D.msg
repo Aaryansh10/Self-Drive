@@ -8,3 +8,7 @@ float32 y2
 bool is_in_lane
 bool is_stop_sign
 float32 sign_real_prob
+float32 distance
+uint32 n_pts
+bool depth_valid
+geometry_msgs/Point position
