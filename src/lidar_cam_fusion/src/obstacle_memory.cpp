@@ -15,8 +15,10 @@
 #include "tf2_ros/transform_listener.h"
 #include "tf2_geometry_msgs/tf2_geometry_msgs.hpp"
 #include "vision_interfaces/msg/detection_array.hpp"
+#include "fusion_interfaces/msg/tracked_obstacle.hpp"
+#include "fusion_interfaces/msg/tracked_obstacle_array.hpp"
 
-using det = vision_interfaces_interfaces::msg::DetectionDistanceArray;
+using det = vision_interfaces::msg::DetectionDistanceArray;
 using trmsg = fusion_interfaces::msg::TrackedObstacle;
 using TransformStamped = geometry_msgs::msg::TransformStamped;
 using out = fusion_interfaces::msg::TrackedObstacleArray;
@@ -146,7 +148,7 @@ class ObstacleMemory : public rclcpp::Node {
         continue;
       }
 
-      Eigen::Vector3d measurement = transform_point(Eigen::Vector3d(detection.p.x, detection.p.y, detection.p.z), odom_from_source);
+      Eigen::Vector3d measurement = transform_point(Eigen::Vector3d(detection.position.x, detection.position.y, detection.position.z), odom_from_source);
 
       int best_index = -1;
       double best_distance = gate_base + (gate_range * detection.distance);

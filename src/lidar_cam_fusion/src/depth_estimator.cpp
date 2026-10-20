@@ -208,6 +208,7 @@ std::string camera_frame;
           if (stop_line_valid && age <= stop_line_max_age) {
                 result.distance = stop_line_dist;
                 set_position(result, 0.5 * (b.x1 + b.x2), 0.5 * (b.y1 + b.y2), stop_line_dist);   
+                result.depth_valid = true;
             }
             output.detections.push_back(result);  
             continue;
@@ -283,7 +284,6 @@ std::string camera_frame;
 
             result.distance = depths[index];
             set_position(result, 0.5 * (b.x1 + b.x2), 0.5 * (b.y1 + b.y2), result.distance); 
-            result.depth_valid = true;
         }
         output.detections.push_back(result);
     }
