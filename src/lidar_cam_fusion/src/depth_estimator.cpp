@@ -10,8 +10,6 @@
 #include "sensor_msgs/point_cloud2_iterator.hpp"
 #include "sensor_msgs/msg/point_cloud2.hpp"
 #include "vision_interfaces/msg/detection_array.hpp"
-#include "fusion_interfaces/msg/detection_distance.hpp"
-#include "fusion_interfaces/msg/detection_distance_array.hpp"
 #include "message_filters/subscriber.h"
 #include "message_filters/synchronizer.h"
 #include "message_filters/sync_policies/approximate_time.h"
@@ -28,7 +26,7 @@
 using det = vision_interfaces::msg::DetectionArray;
 using cl = sensor_msgs::msg::PointCloud2;
 using pol = message_filters::sync_policies::ApproximateTime<det, cl>;
-using out = fusion_interfaces::msg::DetectionDistanceArray;
+using out = vision_interfaces::msg::DetectionArray;
 
 class Fusion : public rclcpp::Node {
     public: 
@@ -53,7 +51,7 @@ class Fusion : public rclcpp::Node {
         sync = std::make_shared<message_filters::Synchronizer<pol>>(pol(10),detection_subscription,cloud_subscription);
         sync->setMaxIntervalDuration(rclcpp::Duration::from_seconds(0.1));
         sync->registerCallback(&Fusion::fusion_callback, this);
-        distance_publisher = this->create_publisher<out>("detected_distance", 10);
+        distance_publisher = this->create_publisher<out>("detections_depth", 10);
     }
     
     private: 
@@ -73,7 +71,7 @@ class Fusion : public rclcpp::Node {
     bool stop_line_valid = false;
     float stop_line_dist = 0.0f;
     size_t stop_line_n = 0;
-    rclcpp::Time stop_line_stamp;
+    rclcpp::Time stop_line_stamp{0, 0 , RCL_ROS_TIME};
         
 rclcpp::Subscription<sensor_msgs::msg::CameraInfo>::SharedPtr camera_subscription;
 message_filters::Subscriber<det> detection_subscription;
@@ -125,14 +123,11 @@ std::string camera_frame;
     sensor_msgs::PointCloud2ConstIterator<float> iy(tc,"y");
     sensor_msgs::PointCloud2ConstIterator<float> iz(tc,"z");
 
-    while (ix != ix.end()) {
-        ++ix;
-        ++iy;
-        ++iz;
-        if (!std::isfinite(*ix) || !std::isfinite(*iy) || !std::isfinite(*iz) || *ix <= 0.1f)
-                continue;
-        depths.push_back(*ix);
-}
+    for (; ix != ix.end(); ++ix, ++iy, ++iz) {   
+       if (!std::isfinite(*ix) || !std::isfinite(*iy) || !std::isfinite(*iz) || *ix <= 0.1f)
+           continue;
+       depths.push_back(*ix);
+   }
 
     stop_line_n = depths.size();
     stop_line_valid = depths.size() >= static_cast<size_t>(stop_line_min_points);
@@ -154,6 +149,13 @@ std::string camera_frame;
         depth = static_cast<float>(t);
         return true;
     }
+
+        void set_position(vision_interfaces::msg::Detection2D &result, double u, double v, double d) {   
+        result.position.x = d;                       
+        result.position.y = -(u - cx) * d / fx;      
+        result.position.z = -(v - cy) * d / fy;      
+    }   
+
 
     void fusion_callback(const det::ConstSharedPtr &detections, const cl::ConstSharedPtr &cloud)
 {
@@ -188,46 +190,44 @@ std::string camera_frame;
         have_ground = true;
     }
     catch(const tf2::TransformException &e) {
-        RCLCPP_WARN(this->get_logger(), "Ground transform failed: %s", e.what());
-        return;
+        RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000, "Ground transform failed: %s", e.what()); 
     }
 
     out output;
     output.header = detections->header;
+    output.header.frame_id = camera_frame;
 
     for (const auto &b : detections->detections) {
         
-        fusion_interfaces::msg::DetectionDistance result;
+        auto result = b;
 
-        result.class_id = b.class_id;
-        result.class_name = b.class_name;
-        result.score = b.score;
-
-        if(b.class_name == stop_sign_class) {
+        if(b.is_stop_sign) {   
             result.n_pts = stop_line_n;
-            result.valid = false;
+            result.depth_valid = false;  
             double age = std::fabs((rclcpp::Time(detections->header.stamp) - stop_line_stamp).seconds());
-            if (stop_line_valid && age <= stop_line_max_age) {
+          if (stop_line_valid && age <= stop_line_max_age) {
                 result.distance = stop_line_dist;
-                result.valid = true;
+                set_position(result, 0.5 * (b.x1 + b.x2), 0.5 * (b.y1 + b.y2), stop_line_dist);   
             }
-            output.items.push_back(result);
+            output.detections.push_back(result);  
             continue;
         }
 
+
         if(ipm_classes.count(b.class_name)) {
             result.n_pts = 0;
-            result.valid = false;
+            result.depth_valid = false;
             if (have_ground) {
                 float depth = 0.0f;
                 double u = 0.5 * (b.x1 + b.x2);
                 double v = 0.5 * (b.y1 + b.y2);
                 if (ipm_depth(u,v,ipm_origin,ipm_R,depth)){
                     result.distance = depth;
-                    result.valid = true;
+                    set_position(result, u, v, depth);
+                    result.depth_valid = true;
                 }
             }
-            output.items.push_back(result);
+            output.detections.push_back(result);
             continue;
         }
 
@@ -268,9 +268,9 @@ std::string camera_frame;
         }
 
         result.n_pts = depths.size();
-        result.valid = depths.size() >= 3;
+        result.depth_valid = depths.size() >= 3;
 
-        if (result.valid) {
+        if (result.depth_valid) {
 
             size_t index =
                 static_cast<size_t>(depths.size() * 0.25);
@@ -282,8 +282,10 @@ std::string camera_frame;
             );
 
             result.distance = depths[index];
+            set_position(result, 0.5 * (b.x1 + b.x2), 0.5 * (b.y1 + b.y2), result.distance); 
+            result.depth_valid = true;
         }
-        output.items.push_back(result);
+        output.detections.push_back(result);
     }
 
     distance_publisher->publish(output);
@@ -291,7 +293,7 @@ std::string camera_frame;
     RCLCPP_INFO(
         this->get_logger(),
         "Published distances for %zu detections",
-        output.items.size()
+        output.detections.size()
     );
 }
 
