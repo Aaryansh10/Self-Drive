@@ -96,7 +96,7 @@ namespace lane_mapper {
             bool inWindow(int grid_x, int grid_y) const;
             // Checks if the point is actually on the grid
 
-            void applyLogOdds(size_t i, float d);
+            void applyLogOdds(size_t i, float delta);
             // Does the actual log-odds maths
 
             // Functions to implement the rolling window
@@ -116,7 +116,7 @@ namespace lane_mapper {
             bool initialised_ = false;
 
             std::vector<float> log_odds_; // Stores the probability score for every cell
-            std::vector<float> frame_ev_;
+            std::vector<float> frame_ev_; // Stores the current frames splats
             std::vector<uint8_t> seen_;
             std::vector<size_t> touched_;
     };
