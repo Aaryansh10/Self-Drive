@@ -18,7 +18,7 @@
 #include "fusion_interfaces/msg/tracked_obstacle.hpp"
 #include "fusion_interfaces/msg/tracked_obstacle_array.hpp"
 
-using det = vision_interfaces::msg::DetectionDistanceArray;
+using det = vision_interfaces::msg::DetectionArray;
 using trmsg = fusion_interfaces::msg::TrackedObstacle;
 using TransformStamped = geometry_msgs::msg::TransformStamped;
 using out = fusion_interfaces::msg::TrackedObstacleArray;
@@ -55,7 +55,7 @@ class ObstacleMemory : public rclcpp::Node {
     
     //publishers and subscribers
     camera_subscription = this->create_subscription<sensor_msgs::msg::CameraInfo>("zed_node/monocamera/camera_info", rclcpp::SensorDataQoS(), std::bind(&ObstacleMemory::camera_callback, this, std::placeholders::_1));
-    detection_subscription = this->create_subscription<det>("detections_lane", 10, std::bind(&ObstacleMemory::detection_callback, this, std::placeholders::_1));
+    detection_subscription = this->create_subscription<det>("detections_lane", rclcpp::SensorDataQoS(), std::bind(&ObstacleMemory::detection_callback, this, std::placeholders::_1));
     pub = this->create_publisher<out>("tracked_obstacles", 10);
     timer = create_wall_timer(std::chrono::milliseconds(50), std::bind(&ObstacleMemory::timer_callback, this));
    }
