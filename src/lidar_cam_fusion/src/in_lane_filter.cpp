@@ -56,7 +56,7 @@ class InLaneFilter : public rclcpp::Node {
 
     struct LaneCloud {
         std::vector<P2> pts;
-        rclcpp::Time stamp;
+        rclcpp::Time stamp{0, 0, RCL_ROS_TIME};
         bool valid = false;
     };
 
