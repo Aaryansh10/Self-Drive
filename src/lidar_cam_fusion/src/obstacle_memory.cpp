@@ -42,7 +42,7 @@ class ObstacleMemory : public rclcpp::Node {
    ObstacleMemory() : Node("obstacle_memory"), tf_buffer(this->get_clock()), tf_listener(tf_buffer){
     
     //parameters
-    odom_frame = declare_parameter<std::string>("odom_frame", "camera_init");
+    odom_frame = declare_parameter<std::string>("odom_frame", "odom");
     base_frame = declare_parameter<std::string>("base_frame", "link_base");
     gate_base = declare_parameter<double>("gate_base", 0.5);
     gate_range = declare_parameter<double>("gate_range", 0.05);
