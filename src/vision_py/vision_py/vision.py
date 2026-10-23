@@ -16,6 +16,7 @@ from vision_py.architectures.hydra_net.model import build_hydranet
 from vision_py.centerline import CenterlineGenerator
 from vision_py.ipm import project_pixels_torch
 from vision_py.model_helpers import load_weights, preprocess, postprocess_detections, clean_mask
+from vision_py.thinning import zhang_suen_thinning, order_skeleton_pixels
 
 class Vision(Node):
     def __init__(self):
@@ -199,13 +200,15 @@ class Vision(Node):
             u_sub = torch.arange(W, device=mask.device)
             return v_sub[has_edge], u_sub[has_edge]
 
-        v_sub_whitelane, u_sub_whitelane = leading_edge_extraction(mask_whitelane)
+        skel = zhang_suen_thinning(torch.stack([mask_whitelane, mask_yellow]))
+        v_sub_whitelane, u_sub_whitelane = order_skeleton_pixels(skel[0])
+        v_sub_yellow, u_sub_yellow = order_skeleton_pixels(skel[1])
+
         pc_whitelane = project_pixels_torch(
             v_sub_whitelane, u_sub_whitelane, self.subsample_step, self.pitch_bot,
             self.cx, self.cy, self.fx, self.fy, self.cam_pitch, self.cam_height
         )
 
-        v_sub_yellow, u_sub_yellow = leading_edge_extraction(mask_yellow)
         pc_yellow = project_pixels_torch(
             v_sub_yellow, u_sub_yellow, self.subsample_step, self.pitch_bot,
             self.cx, self.cy, self.fx, self.fy, self.cam_pitch, self.cam_height
