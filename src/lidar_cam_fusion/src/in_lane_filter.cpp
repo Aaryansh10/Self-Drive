@@ -37,6 +37,7 @@ class InLaneFilter : public rclcpp::Node {
         x_window = declare_parameter<double>("x_window", 1.5);
         max_lane_width = declare_parameter<double>("max_lane_width", 5.0);
         min_lane_width = declare_parameter<double>("min_lane_width", 1.0);
+        lane_width = declare_parameter<double>("lane_width", 3.5);
         lane_margin = declare_parameter<double>("lane_margin", 0.0);
         lane_max_age = declare_parameter<double>("lane_max_age", 0.5);
         in_lane_unknown = declare_parameter<bool>("in_lane_unknown", false);        
@@ -62,7 +63,7 @@ class InLaneFilter : public rclcpp::Node {
 
     enum class Lane {IN,OUT,UNKNOWN};
     std::string ground_frame;
-    double x_window, max_lane_width, min_lane_width, lane_margin, lane_max_age;
+    double x_window, max_lane_width, min_lane_width, lane_margin, lane_max_age, lane_width;
     bool in_lane_unknown;
     LaneCloud white, yellow;
 
@@ -151,15 +152,26 @@ class InLaneFilter : public rclcpp::Node {
     }
 
     //Main function to check whether in lane
-    Lane check(double x, double y) const {
-        double y_white, y_yellow;
-        if(boundary(white,x,y_white) == false || boundary(yellow,x,y_yellow) == false) 
+    Lane check(double x, double y, bool white_fresh, bool yellow_fresh) const {
+        double y_white=0 , y_yellow=0;
+        bool has_white = white_fresh && boundary(white, x, y_white);    
+        bool has_yellow = yellow_fresh && boundary(yellow, x, y_yellow);
+        double hi=0, lo=0;
+        if (has_white && has_yellow) { 
+            lo = std::min(y_white, y_yellow);
+            hi = std::max(y_white, y_yellow);
+        if(hi-lo > max_lane_width || hi-lo < min_lane_width) 
+        return Lane::UNKNOWN;
+        }
+        else if(has_white || has_yellow) {
+            double y_line = has_yellow ? y_yellow:y_white;
+            bool left = y_line > 0;
+            lo = left ? y_line - lane_width : y_line;
+            hi = left ? y_line : y_line + lane_width;
+        }
+        else 
         return Lane::UNKNOWN;
     
-        double lo = std::min(y_white, y_yellow) , hi = std::max(y_white, y_yellow);
-        if((hi-lo) > max_lane_width || (hi-lo) < min_lane_width)
-        return Lane::UNKNOWN;
-
         if (y >= lo - lane_margin && y <= hi + lane_margin)
         return Lane::IN;
         else
@@ -169,7 +181,9 @@ class InLaneFilter : public rclcpp::Node {
     void detection_callback(const det::ConstSharedPtr msg) {
         det output = *msg;
         const::rclcpp::Time now(msg->header.stamp);
-        const bool lanes_ok = fresh(white, now) && fresh(yellow, now);
+        const bool white_fresh = fresh(white, now);
+        const bool yellow_fresh = fresh(yellow, now);
+        const bool lanes_ok = white_fresh || yellow_fresh;
         if(lanes_ok == false) {
             RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000, "Lane cloud missing");
         }
@@ -192,13 +206,15 @@ class InLaneFilter : public rclcpp::Node {
                 source_point.header = msg->header;
                 source_point.point = item.position;
                 tf2::doTransform(source_point, target_point, g);
-                r = check(target_point.point.x , target_point.point.y);
+                r = check(target_point.point.x , target_point.point.y, white_fresh, yellow_fresh);
+                //debug 
                 double y_white = 0, y_yellow = 0;
-                bool has_white = boundary(white, target_point.point.x, y_white);
-                bool has_yellow = boundary(yellow, target_point.point.x, y_yellow);
-                RCLCPP_INFO(get_logger(), "obj x=%.2f y=%.2f z=%.2f | white=%d %.2f yellow=%d %.2f -> %d",
+                bool has_white = white_fresh && boundary(white, target_point.point.x, y_white);      //changed: respects freshness like check()
+                bool has_yellow = yellow_fresh && boundary(yellow, target_point.point.x, y_yellow);  //changed: respects freshness like check()
+                RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 1000, "obj x=%.2f y=%.2f z=%.2f | white=%d %.2f yellow=%d %.2f -> %d",   //changed: throttled to once per second
                 target_point.point.x, target_point.point.y, target_point.point.z,
                     has_white, y_white, has_yellow, y_yellow, static_cast<int>(r));
+
             }
             item.is_in_lane = (r == Lane::IN) || (r == Lane::UNKNOWN && in_lane_unknown);
         }
