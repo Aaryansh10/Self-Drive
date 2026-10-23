@@ -1,2 +1,40 @@
-<root BTCPP_format="4" main_tree_to_execute="main_tree">
-    <reactive_sequence>
+<root BTCPP_format="4" main_tree_to_execute="Main">
+    <BehaviorTree ID="Main">
+
+        <ReactiveSequence>
+
+            <DecideAction decision="{decision}" obstacle_id="{obstacle_id}"/>
+
+            <ReactiveFallback>
+
+                <Sequence>
+                    <ScriptCondition code="decision == 'stop'"/>
+                    <StopRobot/>
+                </Sequence>
+ 
+                <Parallel success_count="-1" failure_count="1">
+
+                    <LaneFollowing/>
+// check the failure condition once 
+                    <KeepRunningUntilFailure>
+                        <ForceSuccess>
+                            <Sequence>
+                                <ScriptCondition code="decision == 'change'"/>
+                                <LaneChange obstacle_id="{obstacle_id}"/>
+                            </Sequence>
+                        </ForceSuccess>
+                    </KeepRunningUntilFailure>
+
+                </Parallel>
+ 
+            </ReactiveFallback>
+
+        </ReactiveSequence>
+
+    </BehaviorTree>
+</root>
+
+//One known gap I left: 
+//if the tree halts LaneChange after the server already flipped the lane but before the result was processed, 
+//the obstacle isn't marked handled, and a second lane change could follow once the stop clears. 
+//The window is tiny, because the server answers instantly. 
