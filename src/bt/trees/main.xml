@@ -15,7 +15,7 @@
                 <Parallel success_count="-1" failure_count="1">
 
                     <LaneFollowing/>
-// check the failure condition once 
+                    <!--check the failure condition once -->
                     <KeepRunningUntilFailure>
                         <ForceSuccess>
                             <Sequence>
@@ -34,7 +34,7 @@
     </BehaviorTree>
 </root>
 
-//One known gap I left: 
+<!--One known gap I left: 
 //if the tree halts LaneChange after the server already flipped the lane but before the result was processed, 
 //the obstacle isn't marked handled, and a second lane change could follow once the stop clears. 
-//The window is tiny, because the server answers instantly. 
+//The window is tiny, because the server answers instantly.  -->
