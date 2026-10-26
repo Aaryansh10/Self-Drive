@@ -7,7 +7,7 @@
 
 #include "behaviortree_cpp/bt_factory.h"
 #include "behaviortree_ros2/ros_node_params.hpp"
-#include "fusion_interfaces/msg/detection_distance_array.hpp"
+#include "fusion_interfaces/msg/tracked_obstacle_array.hpp"
 #include "bt/nodes.hpp"
 #include "bt/shared_state.hpp"
 #include "rclcpp/rclcpp.hpp"
@@ -27,7 +27,7 @@ int main(int argc, char** argv) {
   const auto log = node->get_logger();
 
   const auto tree_file = node->declare_parameter<std::string>("tree_file", "");
-  const auto det_topic = node->declare_parameter<std::string>("detections_topic", "/detected_distances");
+  const auto det_topic = node->declare_parameter<std::string>("detections_topic", "/tracked_obstacles");
   const auto enable_topic = node->declare_parameter<std::string>("lane_follow_enable_topic", "/lane_follow/enable");
   const auto lane_change_action = node->declare_parameter<std::string>("lane_change_action", "lane_change");
   const double tick_rate = node->declare_parameter<double>("tick_rate", 20.0);
@@ -63,7 +63,7 @@ int main(int argc, char** argv) {
   auto state = std::make_shared<bt::SharedState>(cfg, stale, [node] { return node->now().seconds(); });
 
   // detections -> shared state. TODO(obstacle id): when DetectionDistance gets an id field, set d.id = it.<field>.
-  using DetArray = fusion_interfaces::msg::DetectionDistanceArray;
+  /*using DetArray = fusion_interfaces::msg::TrackedObstacleArray;
   auto sub = node->create_subscription<DetArray>(det_topic, rclcpp::SensorDataQoS(), [state](DetArray::ConstSharedPtr msg) {
     std::vector<bt::Detection> dets;
     dets.reserve(msg->items.size());
@@ -75,6 +75,23 @@ int main(int argc, char** argv) {
       d.valid = it.valid;
       d.distance = it.distance;
       d.id = -1;
+      dets.push_back(d);
+    }
+    state->on_detections(dets);
+  });*/
+  // detections -> shared state
+  using DetArray = fusion_interfaces::msg::TrackedObstacleArray;
+  auto sub = node->create_subscription<DetArray>(det_topic, rclcpp::SensorDataQoS(), [state](DetArray::ConstSharedPtr msg) {
+    std::vector<bt::Detection> dets;
+    dets.reserve(msg->obstacles.size());
+    for (const auto& it : msg->obstacles) {
+      bt::Detection d;
+      d.cls = it.class_name;
+      d.score = 1.0; // Default score since TrackedObstacle does not publish score
+      d.n_pts = static_cast<int>(it.hits);
+      d.valid = true; // Assume tracked obstacles received are valid
+      d.distance = it.range;
+      d.id = static_cast<int>(it.id);
       dets.push_back(d);
     }
     state->on_detections(dets);

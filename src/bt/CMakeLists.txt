@@ -16,9 +16,11 @@ find_package(lane_change_interfaces REQUIRED)
 find_package(std_msgs REQUIRED)
 
 add_executable(bt_executor src/bt_executor.cpp)
-target_include_directories(bt_executor PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
-ament_target_dependencies(bt_executor rclcpp rclcpp_action std_msgs fusion_interfaces lane_change_interfaces)
-target_link_libraries(bt_executor behaviortree_ros2::behaviortree_ros2)
+target_include_directories(bt_executor PRIVATE 
+                            ${CMAKE_CURRENT_SOURCE_DIR}/include )
+ament_target_dependencies(bt_executor rclcpp rclcpp_action std_msgs fusion_interfaces lane_change_interfaces behaviortree_ros2 behaviortree_cpp)
+target_link_libraries(bt_executor 
+    behaviortree_ros2::behaviortree_ros2)
  
 install(TARGETS bt_executor DESTINATION lib/${PROJECT_NAME})
 install(DIRECTORY config launch trees DESTINATION share/${PROJECT_NAME})
