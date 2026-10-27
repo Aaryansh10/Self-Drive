@@ -49,7 +49,7 @@ class ObstacleMemory : public rclcpp::Node {
     pass_margin = declare_parameter<double>("pass_margin", 0.5);
     max_visible_range = declare_parameter<double>("max_visible_range", 12.0);
     confirm_hits = declare_parameter<int>("confirm_hits", 3);
-    confirm_window = declare_parameter<int>("confirm_window", 5);
+    confirm_window = declare_parameter<int>("confirm_window", 10);
     max_out_of_lane = declare_parameter<int>("max_out_of_lane", 4);
     max_visible_misses = declare_parameter<int>("max_visible_misses", 10);
     
@@ -231,7 +231,7 @@ class ObstacleMemory : public rclcpp::Node {
       bool passed = in_base.x() < -pass_margin ;
       bool out_of_lane = i->consecutive_out_of_lane >= max_out_of_lane;
       bool stale = i->misses >= max_visible_misses;
-      bool tentative_expired = i->confirmed == false && ((i->age - i->hits) >= 3 || i->age > confirm_window);
+      bool tentative_expired = i->confirmed == false && i->age > confirm_window;
 
     // Delete expired tracks
 

@@ -45,8 +45,8 @@ int main(int argc, char** argv) {
   cfg.pseudo_ttl = node->declare_parameter<double>("pseudo_ttl", cfg.pseudo_ttl);
   cfg.same_obstacle_tol = node->declare_parameter<double>("same_obstacle_tol", cfg.same_obstacle_tol);
 
-  // class table: class_names + classes.<name>.action / classes.<name>.trigger_distance
-  const auto names = node->declare_parameter<std::vector<std::string>>("class_names", std::vector<std::string>{});
+  // class table: class_name + classes.<name>.action / classes.<name>.trigger_distance
+  const auto names = node->declare_parameter<std::vector<std::string>>("class_name", std::vector<std::string>{});
   for (const auto& n : names) {
     bt::ClassRule r;
     r.action = parse_action(node->declare_parameter<std::string>("classes." + n + ".action", "none"), log, n);
@@ -54,7 +54,7 @@ int main(int argc, char** argv) {
     cfg.classes[n] = r;
     RCLCPP_INFO(log, "class %-12s -> %-6s inside %.2f m", n.c_str(), bt::to_string(r.action), r.trigger_distance);
   }
-  if (cfg.classes.empty()) RCLCPP_WARN(log, "class_names is empty: nothing will ever trigger");
+  if (cfg.classes.empty()) RCLCPP_WARN(log, "class_name is empty: nothing will ever trigger");
   if (tree_file.empty()) {
     RCLCPP_FATAL(log, "parameter tree_file is empty");
     return 1;

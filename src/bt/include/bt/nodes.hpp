@@ -15,7 +15,7 @@
 
 namespace bt {
 
-// Reads the latest decision and writes it to the blackboard: decision = none | change | stop.
+// reads the latest decision and writes it on the blackboard  , decision = none  or change or stop.
 class DecideAction : public BT::SyncActionNode {
  public:
   DecideAction(const std::string& name, const BT::NodeConfig& config, std::shared_ptr<SharedState> state)
@@ -42,7 +42,7 @@ class DecideAction : public BT::SyncActionNode {
   Action last_ = Action::NONE;
 };
 
-// Placeholder until a stop action server exists: reports it and FAILS, so the tree falls through to lane following.
+// stop !!- not done 
 class StopRobot : public BT::SyncActionNode {
  public:
   StopRobot(const std::string& name, const BT::NodeConfig& config) : BT::SyncActionNode(name, config) {}
@@ -88,7 +88,7 @@ class LaneFollowing : public BT::StatefulActionNode {
   rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr pub_;
 };
 
-// Sends ONE LaneChange goal. On success the obstacle is marked handled, so the same obstacle can't trigger again.
+// send lane change goal ... if success the obstacle is marked handled, so the same obstacle can't trigger again.
 class LaneChange : public BT::RosActionNode<lane_change_interfaces::action::LaneChange> {
  public:
   using LaneChangeAction = lane_change_interfaces::action::LaneChange;

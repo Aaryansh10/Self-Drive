@@ -15,5 +15,6 @@ def generate_launch_description():
         DeclareLaunchArgument('use_sim_time', default_value='true'),
         Node(package='bt', executable='bt_executor', name='bt', output='screen',
              parameters=[os.path.join(share, 'config', 'bt.yaml'),
-                         {'tree_file': os.path.join(share, 'trees', 'main.xml'), 'use_sim_time': sim}]),
+                         {'tree_file': os.path.join(share, 'trees', 'main.xml'), 'use_sim_time': sim,
+                         'detections_topic': '/tracked_obstacles'}]),
     ])

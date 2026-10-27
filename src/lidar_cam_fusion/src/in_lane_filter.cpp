@@ -34,13 +34,13 @@ class InLaneFilter : public rclcpp::Node {
         std::string white_topic = declare_parameter<std::string>("white_lane_topic", "pc_whitelane");
         std::string yellow_topic = declare_parameter<std::string>("yellow_lane_topic", "pc_yellowlane");
         ground_frame = declare_parameter<std::string>("ground_frame", "link_base");
-        x_window = declare_parameter<double>("x_window", 1.5);
+        x_window = declare_parameter<double>("x_window", 5.0);
         max_lane_width = declare_parameter<double>("max_lane_width", 5.0);
         min_lane_width = declare_parameter<double>("min_lane_width", 1.0);
-        lane_width = declare_parameter<double>("lane_width", 3.5);
+        lane_width = declare_parameter<double>("lane_width", 3.8);
         lane_margin = declare_parameter<double>("lane_margin", 0.0);
         lane_max_age = declare_parameter<double>("lane_max_age", 0.5);
-        in_lane_unknown = declare_parameter<bool>("in_lane_unknown", false);        
+        in_lane_unknown = declare_parameter<bool>("in_lane_unknown", true);        
 
         //publishers and subscribers 
         white_sub = this->create_subscription<cl>(white_topic, rclcpp::SensorDataQoS(), std::bind(&InLaneFilter::white_callback, this, std::placeholders::_1));

@@ -1,6 +1,6 @@
 bt:
   ros__parameters:
-    detections_topic: /detected_distances
+    detections_topic: /tracked_obstacles
     lane_follow_enable_topic: /lane_follow/enable   # path_bridge gate 
     lane_change_action: lane_change
     tick_rate: 20.0
@@ -18,11 +18,11 @@ bt:
     pseudo_ttl: 2.0               # s, forget a handled id-less obstacle after this long unseen
     same_obstacle_tol: 0.5        # m, id-less matching: distance may grow this much and still be the same obstacle
 
-    # class table: exact class_name strings from /detected_distances. action = stop | change | none
-    class_names: ["pedestrians", "stop_sign", "barrels", "tyre", "potholes"]
+    # class table: exact class_name strings from /tracked_obstacles. action = stop | change | none
+    class_name: ["pedestrian", "sign", "barrel", "tyre", "potholes"]
     classes:
-      pedestrians: {action: stop, trigger_distance: 5.0}
-      stop_sign:   {action: stop, trigger_distance: 5.0}
-      barrels:     {action: change, trigger_distance: 13.0}
+      pedestrian: {action: stop, trigger_distance: 5.0}
+      sign:   {action: stop, trigger_distance: 5.0}
+      barrel:     {action: change, trigger_distance: 13.0}
       tyre:        {action: change, trigger_distance: 13.0}
-      potholes:    {action: change, trigger_distance: 13.0}
+      pothole:    {action: change, trigger_distance: 13.0}
