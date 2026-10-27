@@ -1,0 +1,19 @@
+# ---- Goal ----
+float32 hold_time
+string target_class
+
+# ---- Result ----
+bool success
+string message
+string class_name          # obstacle class that triggered the stop
+float32 final_distance     # gap between bot front and obstacle at standstill (m)
+float32 stopping_distance  # distance travelled between brake trigger and standstill (m)
+float32 trigger_speed      # speed when braking started (m/s)
+
+# ---- Feedback ----
+string state               # MONITORING | BRAKING | STOPPED
+string class_name          # obstacle currently controlling the stop
+float32 distance           # estimated gap to that obstacle (m)
+float32 trigger_distance   # distance at which braking starts for current speed (m)
+float32 speed              # measured speed (m/s)
+float32 cmd_speed          # speed currently commanded by this server (m/s)
