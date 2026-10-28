@@ -1,10 +1,12 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <map>
 #include <memory>
 #include <string>
 #include <vector>
 #include <functional>
+#include <Eigen/Dense>
 #include "rclcpp/rclcpp.hpp"
 #include "sensor_msgs/msg/point_cloud2.hpp"
 #include "sensor_msgs/point_cloud2_iterator.hpp"
@@ -13,9 +15,6 @@
 #include "tf2_geometry_msgs/tf2_geometry_msgs.hpp"
 #include "tf2/time.h"
 #include "tf2/exceptions.h"
-#include "tf2/LinearMath/Quaternion.h"
-#include "tf2/LinearMath/Matrix3x3.h"
-#include "tf2/LinearMath/Vector3.h"
 #include "tf2_ros/buffer.h"
 #include "tf2_ros/transform_listener.h"
 #include "tf2_sensor_msgs/tf2_sensor_msgs.hpp"
@@ -23,26 +22,33 @@
 
 using det = vision_interfaces::msg::DetectionArray;
 using cl = sensor_msgs::msg::PointCloud2;
-    
+
 class InLaneFilter : public rclcpp::Node {
     public:
     InLaneFilter() : Node("in_lane_filter"), tf_buffer(this->get_clock()), tf_listener(tf_buffer){
-        
+
         //parameters
         std::string in_topic = declare_parameter<std::string>("input_topic", "detections_depth");
         std::string out_topic = declare_parameter<std::string>("output_topic", "detections_lane");
         std::string white_topic = declare_parameter<std::string>("white_lane_topic", "pc_whitelane");
         std::string yellow_topic = declare_parameter<std::string>("yellow_lane_topic", "pc_yellowlane");
         ground_frame = declare_parameter<std::string>("ground_frame", "link_base");
-        x_window = declare_parameter<double>("x_window", 5.0);
         max_lane_width = declare_parameter<double>("max_lane_width", 5.0);
         min_lane_width = declare_parameter<double>("min_lane_width", 1.0);
         lane_width = declare_parameter<double>("lane_width", 3.8);
         lane_margin = declare_parameter<double>("lane_margin", 0.0);
         lane_max_age = declare_parameter<double>("lane_max_age", 0.5);
-        in_lane_unknown = declare_parameter<bool>("in_lane_unknown", true);        
+        in_lane_unknown = declare_parameter<bool>("in_lane_unknown", false);
+        //lane curve fitting / extrapolation
+        bin_size = declare_parameter<double>("bin_size", 1.0);                   
+        min_bin_points = declare_parameter<int>("min_bin_points", 2);
+        min_fit_span = declare_parameter<double>("min_fit_span", 2.0);           
+        max_extrapolation = declare_parameter<double>("max_extrapolation", 15.0); 
+        max_slope = declare_parameter<double>("max_slope", 0.6);                 
+        track_tol = declare_parameter<double>("track_tol", 0.3);                 
+        require_bracket = declare_parameter<bool>("require_bracket", true);     
 
-        //publishers and subscribers 
+        //publishers and subscribers
         white_sub = this->create_subscription<cl>(white_topic, rclcpp::SensorDataQoS(), std::bind(&InLaneFilter::white_callback, this, std::placeholders::_1));
         yellow_sub = this->create_subscription<cl>(yellow_topic, rclcpp::SensorDataQoS(), std::bind(&InLaneFilter::yellow_callback, this, std::placeholders::_1));
         detection_subscription = this->create_subscription<det>(in_topic, rclcpp::SensorDataQoS(), std::bind(&InLaneFilter::detection_callback, this, std::placeholders::_1));
@@ -55,16 +61,27 @@ class InLaneFilter : public rclcpp::Node {
         float x,y;
     };
 
+    // Boundary of the bot's own lane as y = a + b*x + c*x^2 
+   struct Curve {
+        bool ok = false;
+        double x_min = 0, x_max = 0;
+        double a = 0, b = 0, c = 0;
+        double y_near = 0;   
+    };
+
     struct LaneCloud {
-        std::vector<P2> pts;
+        Curve curve;
         rclcpp::Time stamp{0, 0, RCL_ROS_TIME};
         bool valid = false;
     };
 
     enum class Lane {IN,OUT,UNKNOWN};
     std::string ground_frame;
-    double x_window, max_lane_width, min_lane_width, lane_margin, lane_max_age, lane_width;
-    bool in_lane_unknown;
+    double max_lane_width, min_lane_width, lane_margin, lane_max_age, lane_width;
+    double bin_size, min_fit_span, max_extrapolation, max_slope;
+    double track_tol;
+    int min_bin_points;
+    bool in_lane_unknown, require_bracket;
     LaneCloud white, yellow;
 
     rclcpp::Subscription<cl>::SharedPtr white_sub, yellow_sub;
@@ -97,6 +114,63 @@ class InLaneFilter : public rclcpp::Node {
         update(yellow, msg);
     }
 
+    Curve fit_curve(const std::vector<P2> &pts) const {
+        Curve cv;
+        std::map<int, std::vector<P2>> bins;
+        for (const auto &p : pts) {
+            if (p.x < 0.0f || std::fabs(p.y) > max_lane_width) continue;   
+            bins[static_cast<int>(std::floor(p.x / bin_size))].push_back(p);
+        }
+
+        std::vector<P2> s;
+        bool seeded = false;
+        double prev_x = 0, prev_y = 0;
+        for (const auto &kv : bins) {
+            const auto &v = kv.second;
+            if (static_cast<int>(v.size()) < min_bin_points) continue;
+            const P2 *best = nullptr;
+            double best_d = std::numeric_limits<double>::infinity();
+            for (const auto &p : v) {
+                double d = seeded ? std::fabs(p.y - prev_y) : std::fabs(p.y);
+                if (d < best_d) { best_d = d; best = &p; }
+            }
+            if (!best) continue;
+            if (!seeded) {
+                if (best_d > lane_width) continue;
+            } else {
+                double tol = track_tol + max_slope * (best->x - prev_x);
+                if (best_d > tol) continue;
+            }
+            s.push_back(*best);
+            prev_x = best->x;
+            prev_y = best->y;
+            seeded = true;
+        }
+        if (s.size() < 2) return cv;
+
+        const double span = s.back().x - s.front().x;
+        if (span < min_fit_span) return cv;
+
+        const int deg = (s.size() >= 4 && span >= 3.0) ? 2 : 1;
+        Eigen::MatrixXd A(s.size(), deg + 1);
+        Eigen::VectorXd yv(s.size());
+        for (size_t i = 0; i < s.size(); ++i) {
+            A(i, 0) = 1.0;
+            A(i, 1) = s[i].x;
+            if (deg == 2) A(i, 2) = static_cast<double>(s[i].x) * s[i].x;
+            yv(i) = s[i].y;
+        }
+        Eigen::VectorXd c = A.colPivHouseholderQr().solve(yv);
+        cv.a = c(0);
+        cv.b = c(1);
+        cv.c = (deg == 2) ? c(2) : 0.0;
+        cv.x_min = s.front().x;
+        cv.x_max = s.back().x;
+        cv.y_near = cv.a + cv.b * cv.x_min + cv.c * cv.x_min * cv.x_min;
+        cv.ok = true;
+        return cv;
+    }
+
     void update(LaneCloud &lane, const cl::ConstSharedPtr &cloud) {
         geometry_msgs::msg::TransformStamped tf;
         //Apply transformation
@@ -105,7 +179,7 @@ class InLaneFilter : public rclcpp::Node {
         }
         catch (const tf2::TransformException &e) {
             RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000, "Lookup transform failed");
-        return;
+            return;
         }
 
         cl tc;
@@ -118,15 +192,15 @@ class InLaneFilter : public rclcpp::Node {
         sensor_msgs::PointCloud2ConstIterator<float> iy(tc,"y");
         sensor_msgs::PointCloud2ConstIterator<float> iz(tc,"z");
 
-           for (; ix != ix.end(); ++ix, ++iy, ++iz) {  
-             if (!std::isfinite(*ix) || !std::isfinite(*iy) || !std::isfinite(*iz))   
-           continue;
-       pts.push_back({*ix, *iy});
-   }
+        for (; ix != ix.end(); ++ix, ++iy, ++iz) {
+            if (!std::isfinite(*ix) || !std::isfinite(*iy) || !std::isfinite(*iz))
+                continue;
+            pts.push_back({*ix, *iy});
+        }
 
-        lane.pts = std::move(pts);
+        lane.curve = fit_curve(pts);
         lane.stamp = rclcpp::Time(cloud->header.stamp);
-        lane.valid = !lane.pts.empty();
+        lane.valid = lane.curve.ok;
     }
 
     //Check whether data is fresh
@@ -134,53 +208,49 @@ class InLaneFilter : public rclcpp::Node {
         return lane.valid && std::fabs((now - lane.stamp).seconds()) <= lane_max_age;
     }
 
-    //searches for lane point closest to robot's centerline
-    bool boundary(const LaneCloud &lane, double x, double &y_out) const {
-        bool found = false;
-        double best = std::numeric_limits<double>::infinity();
-        for (const auto &p : lane.pts) {
-            if (std::fabs(p.x - x) > x_window)
-            continue;
-            double d = std::fabs(p.y);
-            if(d<best) {
-                best = d;
-                y_out = p.y;
-                found = true;
-            }
+    bool eval(const Curve &cv, double x, double &y) const {
+        if (!cv.ok || x < cv.x_min - max_extrapolation || x > cv.x_max + max_extrapolation)
+            return false;
+        const double xe = std::clamp(x, cv.x_min, cv.x_max);
+        y = cv.a + cv.b * xe + cv.c * xe * xe;
+        if (x != xe) {
+            const double slope = std::clamp(cv.b + 2.0 * cv.c * xe, -max_slope, max_slope);
+            y += slope * (x - xe);
         }
-        return found;
+        return true;
     }
 
     //Main function to check whether in lane
-    Lane check(double x, double y, bool white_fresh, bool yellow_fresh) const {
-        double y_white=0 , y_yellow=0;
-        bool has_white = white_fresh && boundary(white, x, y_white);    
-        bool has_yellow = yellow_fresh && boundary(yellow, x, y_yellow);
+    Lane check(double y, bool has_white, double y_white, bool has_yellow, double y_yellow) const {
         double hi=0, lo=0;
-        if (has_white && has_yellow) { 
+        if (has_white && has_yellow) {
+            // the bot must be between its own white and yellow line 
+            if (require_bracket && white.curve.y_near * yellow.curve.y_near >= 0.0)
+                return Lane::UNKNOWN;
             lo = std::min(y_white, y_yellow);
             hi = std::max(y_white, y_yellow);
-        if(hi-lo > max_lane_width || hi-lo < min_lane_width) 
-        return Lane::UNKNOWN;
+            if(hi-lo > max_lane_width || hi-lo < min_lane_width)
+                return Lane::UNKNOWN;
         }
         else if(has_white || has_yellow) {
-            double y_line = has_yellow ? y_yellow:y_white;
-            bool left = y_line > 0;
+            const Curve &c = has_yellow ? yellow.curve : white.curve;
+            double y_line = has_yellow ? y_yellow : y_white;
+            bool left = c.y_near > 0;     
             lo = left ? y_line - lane_width : y_line;
             hi = left ? y_line : y_line + lane_width;
         }
-        else 
-        return Lane::UNKNOWN;
-    
-        if (y >= lo - lane_margin && y <= hi + lane_margin)
-        return Lane::IN;
         else
-        return Lane::OUT;
+            return Lane::UNKNOWN;
+
+        if (y >= lo - lane_margin && y <= hi + lane_margin)
+            return Lane::IN;
+        else
+            return Lane::OUT;
     }
 
     void detection_callback(const det::ConstSharedPtr msg) {
         det output = *msg;
-        const::rclcpp::Time now(msg->header.stamp);
+        const rclcpp::Time now(msg->header.stamp);
         const bool white_fresh = fresh(white, now);
         const bool yellow_fresh = fresh(yellow, now);
         const bool lanes_ok = white_fresh || yellow_fresh;
@@ -192,8 +262,8 @@ class InLaneFilter : public rclcpp::Node {
         bool have_tf = false;
         geometry_msgs::msg::TransformStamped g;
         if(lanes_ok && lookup(ground_frame, msg->header.frame_id, msg->header.stamp, g))
-        have_tf = true;
-        
+            have_tf = true;
+
         for (auto &item : output.detections) {
             if(item.depth_valid == false) {
                 item.is_in_lane = false;
@@ -206,24 +276,28 @@ class InLaneFilter : public rclcpp::Node {
                 source_point.header = msg->header;
                 source_point.point = item.position;
                 tf2::doTransform(source_point, target_point, g);
-                r = check(target_point.point.x , target_point.point.y, white_fresh, yellow_fresh);
-                //debug 
-                double y_white = 0, y_yellow = 0;
-                bool has_white = white_fresh && boundary(white, target_point.point.x, y_white);      //changed: respects freshness like check()
-                bool has_yellow = yellow_fresh && boundary(yellow, target_point.point.x, y_yellow);  //changed: respects freshness like check()
-                RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 1000, "obj x=%.2f y=%.2f z=%.2f | white=%d %.2f yellow=%d %.2f -> %d",   //changed: throttled to once per second
-                target_point.point.x, target_point.point.y, target_point.point.z,
-                    has_white, y_white, has_yellow, y_yellow, static_cast<int>(r));
 
+                double y_white = 0, y_yellow = 0;
+                bool has_white = white_fresh && eval(white.curve, target_point.point.x, y_white);
+                bool has_yellow = yellow_fresh && eval(yellow.curve, target_point.point.x, y_yellow);
+                r = check(target_point.point.y, has_white, y_white, has_yellow, y_yellow);
+
+                //debug: result 0 = IN, 1 = OUT, 2 = UNKNOWN. xmax = farthest point of that lane cloud.
+                RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 1000,
+                    "obj x=%.2f y=%.2f | white=%d y=%.2f near=%.2f xmax=%.1f | yellow=%d y=%.2f near=%.2f xmax=%.1f -> %d",
+                    target_point.point.x, target_point.point.y,
+                    has_white, y_white, white.curve.y_near, white.curve.x_max,
+                    has_yellow, y_yellow, yellow.curve.y_near, yellow.curve.x_max,
+                    static_cast<int>(r));
             }
             item.is_in_lane = (r == Lane::IN) || (r == Lane::UNKNOWN && in_lane_unknown);
         }
         publisher->publish(output);
     }
 };
-    
-    
-    int main(int argc, char **argv)
+
+
+int main(int argc, char **argv)
 {
     rclcpp::init(argc, argv);
     rclcpp::spin(std::make_shared<InLaneFilter>());
