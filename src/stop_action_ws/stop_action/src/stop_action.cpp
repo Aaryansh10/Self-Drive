@@ -127,8 +127,8 @@ namespace stop {
             last_x = x;
             last_y = y;
             have_odom = true;
-            v = msg->twist.twist.linear.x;
-            w = msg->twist.twist.angular.z;
+            v_ = msg->twist.twist.linear.x;
+            w_ = msg->twist.twist.angular.z;
         }
 
         void detection_callback(const det::SharedPtr msg) {
@@ -209,8 +209,61 @@ namespace stop {
                 continue;
                 if((now - track.stamp).seconds() > max_age)
                 continue;
-                out.push_back({name, track.filtered_s - odometer, target})
+                out.push_back({name, track.filtered_s - odometer, target_gap(profiles.at(name), target_fraction)});
             }
+            return out;
+        }
+
+        void publish_cmd(double v_cmd) {
+            geometry_msgs::msg::Twist cmd;
+            cmd.linear.x = v_cmd;
+            const double v = std::fabs(v_);
+            if (v > 0.1) {
+                cmd.angular.z = w_ * std::min(1.0, v_cmd/v);
+            }
+            cmd_pub->publish(cmd);
+        }
+
+        void finish(bool success, const std::string & message, double final_distance) {
+            auto result = std::make_shared<Stop::Result>();
+            result->success = success;
+            result->message = message;
+            result->class_name = brake_class;
+            result->final_distance = static_cast<float>(final_distance);
+            result->stopping_distance = static_cast<float>(odometer - trigger_odometer);
+            result->trigger_speed = static_cast<float>(trigger_speed);
+            if(goal_handle->is_canceling()) {
+                goal_handle->canceled(result);
+            }
+            else if(success) {
+                goal_handle->succeed(result);
+            }
+            else {
+                goal_handle->abort(result);
+            }
+            RCLCPP_INFO(get_logger(), "Goal finished : %s", message.c_str());
+            goal_handle.reset();
+        }
+
+        void control_loop() {
+            if (!goal_handle || !have_odom)
+            return ;
+            const auto now = this->now;
+            const double dt = std::clamp((now - last_tick).seconds, 1e-3, 0.5);
+            last_tick = now;
+
+            if(goal_handle->is_canceling) {
+                finish(false, "cancelled", last_distance);
+                return;
+            }
+
+            const double v = std::fabs(v);
+            Stop::Feedback fb;
+            fb.class_name = brake_class;
+
+            
+
+
         }
 
 
