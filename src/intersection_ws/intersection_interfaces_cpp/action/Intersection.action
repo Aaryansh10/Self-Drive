@@ -5,7 +5,6 @@ uint8 TURN_RIGHT = 2
 
 uint8 turn_direction
 float32 road_width    
-nav_msgs/OccupancyGrid local_map
 
 ---
 

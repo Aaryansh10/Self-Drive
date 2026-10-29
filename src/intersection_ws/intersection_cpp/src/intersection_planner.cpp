@@ -92,7 +92,7 @@ namespace intersection {
 
                     for (int j = std::max(0, cell_j - span); j <= std::min(height_ - 1, cell_j + span); ++j) {
                         for (int i = std::max(0, cell_i - span); i <= std::min(width_ - 1, cell_i + span); ++i) {
-                            if (occupied(i, j) && norm(cellToWorld(i, j)) <= r)
+                            if (occupied(i, j) && norm(cellToWorld(i, j) - p) <= r)
                                 return true;
                         }
                     }
@@ -112,7 +112,7 @@ namespace intersection {
                 }
 
             private:
-                const nav_msgs::msg::OccupancyGrid msg_;
+                const nav_msgs::msg::OccupancyGrid & msg_;
                 int thresh_;
                 double res_;
                 int width_, height_;
@@ -179,8 +179,10 @@ namespace intersection {
 
                 int count = 0;
                 for (const auto & pt : pts) {
-                    if (std::fabs(dot(n, pt - best_pt)) <= p.line_inlier_tol) 
-                        mean = mean + pt; ++count;
+                    if (std::fabs(dot(n, pt - best_pt)) <= p.line_inlier_tol) {
+                        mean = mean + pt;
+                        ++count;
+                    }
                 }
 
                 if (count < p.min_line_pts)
@@ -221,7 +223,6 @@ namespace intersection {
         Turn turn, double road_width
     ) const
     {
-        const Params & p = params_;
         PlanResult result;
         
         auto fail = [&result](const std::string & msg) {
@@ -268,7 +269,7 @@ namespace intersection {
                 all.push_back(pt_robot_frame);
                 
                 if (pt_robot_frame.x <= params_.fit_x_front) {
-                    if (pt_robot_frame.y < y_split && pt_robot_frame.y >= y_split + road_width)
+                    if (pt_robot_frame.y < y_split && pt_robot_frame.y >= y_split - road_width)
                         right_cand.push_back(pt_robot_frame);
                     else if (pt_robot_frame.y >= y_split && pt_robot_frame.y < y_split + road_width)
                         left_cand.push_back(pt_robot_frame);
@@ -313,8 +314,8 @@ namespace intersection {
         result.debug.used_left_line = hasLeft;
         result.debug.lane_center_offset = lane_center;
 
-        const Vec2 dist_map{cos_yaw * dir.x - sin_yaw * dir.y, sin_yaw * dir.x + cos_yaw * dir.y};
-        const double limit = std::min(params_.roi_front, grid.extentAlong({robot_pose.x, robot_pose.y}, dist_map));
+        const Vec2 dir_map{cos_yaw * dir.x - sin_yaw * dir.y, sin_yaw * dir.x + cos_yaw * dir.y};
+        const double limit = std::min(params_.roi_front, grid.extentAlong({robot_pose.x, robot_pose.y}, dir_map));
         const double seed = -0.5;
 
         auto lineEnd = [&](double lat, double & end, bool & visible) -> bool {
@@ -396,6 +397,7 @@ namespace intersection {
             straight_end = T1;
             result.debug.turn_radius = Rt;
             const Vec2 corner{s_end, sigma * Rnat}, centre{T1, sigma * Rt};
+            result.debug.inner_corner_clearance = std::fabs(Rt - norm(corner - centre));
             if (result.debug.inner_corner_clearance < params_.robot_radius) 
                 warn += "arc passes close to the inner lane-line corner; ";
         }
@@ -435,8 +437,8 @@ namespace intersection {
         }
         result.path.resize(pm.size());
         for (size_t i = 0; i < pm.size(); ++i) {
-            const Vec2 dir = (i + 1 < pm.size()) ? pm[i + 1] - pm[i] : pm[i] - pm[i - 1];
-            result.path[i] = {pm[i].x, pm[i].y, std::atan2(dir.y, dir.x)};
+            const Vec2 seg = (i + 1 < pm.size()) ? pm[i + 1] - pm[i] : pm[i] - pm[i - 1];
+            result.path[i] = {pm[i].x, pm[i].y, std::atan2(seg.y, seg.x)};
         }
 
         // Validation
