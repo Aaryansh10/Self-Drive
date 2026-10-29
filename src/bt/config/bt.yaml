@@ -5,13 +5,13 @@ bt:
     lane_change_action: lane_change
     tick_rate: 20.0
     stale_timeout: 1.0            # sec without a detection list -> decision falls back to none
-    lane_change_min_retry: 2.0    # sec, retry lockout after a FAILED lane change goal (a success never blocks the next obstacle)
+    lane_change_min_retry: 4.0    # sec, retry lockout after a FAILED lane change goal (a success never blocks the next obstacle)
 
     # detection filtering
     min_score: 0.5
     min_points: 1
-    min_distance: 0.5             # m, closer readings are ignored
-    confirm_change: 3             # consecutive detection lists before CHANGE is reported
+    min_distance: 2.0             # m, closer readings are ignored
+    confirm_change: 4             # consecutive detection lists before CHANGE is reported
     confirm_stop: 2               # consecutive detection lists before STOP is reported
     hold_time: 0.5                # s, an action survives brief detection dropouts
     handled_ttl: 30.0             # s, forget a handled obstacle id after this long unseen
@@ -19,10 +19,10 @@ bt:
     same_obstacle_tol: 0.5        # m, id-less matching: distance may grow this much and still be the same obstacle
 
     # class table: exact class_name strings from /tracked_obstacles. action = stop | change | none
-    class_name: ["pedestrian", "sign", "barrel", "tyre", "potholes"]
+    class_name: ["pedestrian", "sign", "barrel", "tyre", "pothole"]
     classes:
       pedestrian: {action: stop, trigger_distance: 5.0}
       sign:   {action: stop, trigger_distance: 5.0}
-      barrel:     {action: change, trigger_distance: 13.0}
-      tyre:        {action: change, trigger_distance: 13.0}
-      pothole:    {action: change, trigger_distance: 13.0}
+      barrel:     {action: change, trigger_distance: 3.96}
+      tyre:        {action: change, trigger_distance: 3.96}
+      pothole:    {action: change, trigger_distance: 3.96}

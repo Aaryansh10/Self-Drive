@@ -33,6 +33,7 @@ int main(int argc, char** argv) {
   const double tick_rate = node->declare_parameter<double>("tick_rate", 20.0);
   const double stale = node->declare_parameter<double>("stale_timeout", 1.0);
   const double min_retry = node->declare_parameter<double>("lane_change_min_retry", 2.0);
+  
 
   bt::DecisionConfig cfg;
   cfg.min_score = node->declare_parameter<double>("min_score", cfg.min_score);
@@ -44,6 +45,7 @@ int main(int argc, char** argv) {
   cfg.handled_ttl = node->declare_parameter<double>("handled_ttl", cfg.handled_ttl);
   cfg.pseudo_ttl = node->declare_parameter<double>("pseudo_ttl", cfg.pseudo_ttl);
   cfg.same_obstacle_tol = node->declare_parameter<double>("same_obstacle_tol", cfg.same_obstacle_tol);
+  cfg.max_lateral_offset = node->declare_parameter<double>("max_lateral_offset", 1.2);
 
   // class table: class_name + classes.<name>.action / classes.<name>.trigger_distance
   const auto names = node->declare_parameter<std::vector<std::string>>("class_name", std::vector<std::string>{});
@@ -87,11 +89,19 @@ int main(int argc, char** argv) {
     for (const auto& it : msg->obstacles) {
       bt::Detection d;
       d.cls = it.class_name;
-      d.score = 1.0; // Default score since TrackedObstacle does not publish score
+      d.score = 1.0; 
       d.n_pts = static_cast<int>(it.hits);
-      d.valid = true; // Assume tracked obstacles received are valid
+      d.valid = true; 
       d.distance = it.range;
       d.id = static_cast<int>(it.id);
+      
+      // Use position_odom so spatial memory stays fixed in world frame!
+      d.x = it.position_odom.x;  
+      d.y = it.position_odom.y;  
+      
+      // Keep local y for lateral lane filtering
+      d.local_y = it.position_base.y; 
+
       dets.push_back(d);
     }
     state->on_detections(dets);
