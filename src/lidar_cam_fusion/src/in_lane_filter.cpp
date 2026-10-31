@@ -35,7 +35,7 @@ class InLaneFilter : public rclcpp::Node {
         ground_frame = declare_parameter<std::string>("ground_frame", "link_base");
         max_lane_width = declare_parameter<double>("max_lane_width", 5.0);
         min_lane_width = declare_parameter<double>("min_lane_width", 1.0);
-        lane_width = declare_parameter<double>("lane_width", 3.8);
+        lane_width = declare_parameter<double>("lane_width", 3.5);
         lane_margin = declare_parameter<double>("lane_margin", 0.0);
         lane_max_age = declare_parameter<double>("lane_max_age", 0.5);
         in_lane_unknown = declare_parameter<bool>("in_lane_unknown", false);
@@ -47,6 +47,12 @@ class InLaneFilter : public rclcpp::Node {
         max_slope = declare_parameter<double>("max_slope", 0.6);                 
         track_tol = declare_parameter<double>("track_tol", 0.3);                 
         require_bracket = declare_parameter<bool>("require_bracket", true);     
+
+        /*
+        white_sub = create_subscription<cl>( white_topic, rclcpp::SensorDataQoS(), std::bind(&InLaneFilter::white_callback, this, std::placeholders::_1));
+        yellow_sub = create_subscription<cl>( yellow_topic, rclcpp::SensorDataQoS(),std::bind(&InLaneFilter::yellow_callback, this, std::placeholders::_1));
+        detection_subscription = create_subscription<det>(in_topic, rclcpp::SensorDataQoS(),std::bind(&InLaneFilter::detection_callback, this, std::placeholders::_1));
+        publisher = create_publisher<det>(out_topic, 10); */
 
         //publishers and subscribers
         white_sub = this->create_subscription<cl>(white_topic, rclcpp::SensorDataQoS(), std::bind(&InLaneFilter::white_callback, this, std::placeholders::_1));

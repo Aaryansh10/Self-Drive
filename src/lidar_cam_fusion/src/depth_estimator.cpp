@@ -255,8 +255,14 @@ std::string camera_frame;
                 continue;
             }
 
+            /*
+            float u = cx - fx * y / x;
+            float v = cy - fy * z / x;
+            
+            */
             float u = (fx * x / z) + cx;
             float v = (fy * y / z) + cy;
+           
 
             if (u >= b.x1 && u <= b.x2 &&
                 v >= b.y1 && v <= b.y2)
