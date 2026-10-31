@@ -8,12 +8,9 @@ from rclpy.qos import qos_profile_sensor_data, ReliabilityPolicy, HistoryPolicy,
 from sensor_msgs.msg import Image, CameraInfo, PointCloud2, Imu, PointField
 from vision_interfaces.msg import DetectionArray, Detection2D
 from std_msgs.msg import Header
-from nav_msgs.msg import Path
-from geometry_msgs.msg import PoseStamped
 from cv_bridge import CvBridge
 
 from vision_py.architectures.hydra_net.model import build_hydranet
-from vision_py.centerline import CenterlineGenerator
 from vision_py.ipm import project_pixels_torch
 from vision_py.model_helpers import load_weights, preprocess, postprocess_detections, clean_mask
 from vision_py.thinning import zhang_suen_thinning, order_skeleton_pixels
@@ -50,8 +47,6 @@ class Vision(Node):
         self.declare_parameter("max_detections", 50)
         self.declare_parameter("mask_alpha", 0.45)
 
-        self.declare_parameter("left_centerline_topic", "/path/left_centerline")
-        self.declare_parameter("right_centerline_topic", "/path/right_centerline")        
         self.declare_parameter("ground_frame", "link_base")
 
         self.image_topic = self.get_parameter("image_topic").value
@@ -61,8 +56,6 @@ class Vision(Node):
         self.pc_yellowlane_topic = self.get_parameter("pc_yellowlane_topic").value
         self.pc_stopline_topic = self.get_parameter("pc_stopline_topic").value
         self.detections_topic = self.get_parameter("detections_topic").value
-        self.left_centerline_topic = self.get_parameter("left_centerline_topic").value
-        self.right_centerline_topic = self.get_parameter("right_centerline_topic").value
         self.subsample_step = self.get_parameter("subsample_step").value
         self.cam_pitch = self.get_parameter("cam_pitch").value
         self.cam_height = self.get_parameter("cam_height").value
@@ -135,25 +128,9 @@ class Vision(Node):
             self.detections_topic,
             detections_qos
         )
-        path_qos = QoSProfile(
-            reliability=ReliabilityPolicy.RELIABLE,
-            history=HistoryPolicy.KEEP_LAST,
-            depth=1,
-        )
-        self.left_centerline_pub_ = self.create_publisher(
-            Path,
-            self.left_centerline_topic,
-            path_qos
-        )
-        self.right_centerline_pub_ = self.create_publisher(
-            Path,
-            self.right_centerline_topic,
-            path_qos
-        )
 
         # --- Data members ---
         self.bridge = CvBridge()
-        self.centerline_generator = CenterlineGenerator()
         self.mean = np.array([0.485, 0.456, 0.406] ,dtype=np.float32).reshape(1, 1, 3)
         self.std = np.array([0.229, 0.224, 0.225], dtype=np.float32).reshape(1, 1, 3)
         self.cam_info_recieved = False
@@ -224,12 +201,6 @@ class Vision(Node):
         self.pc_yellowlane_pub_.publish(self.np_to_pc(pc_yellow.cpu().numpy(), header))
         self.pc_stopline_pub_.publish(self.np_to_pc(pc_stopline.cpu().numpy(), header))
 
-        left_xy, right_xy = self.centerline_generator.generate_centerlines(pc_whitelane, pc_yellow)
-        left_path = self.xy_to_path(self.centerline_generator.anchor_to_origin(left_xy), header)
-        right_path = self.xy_to_path(self.centerline_generator.anchor_to_origin(right_xy), header)
-        self.left_centerline_pub_.publish(left_path)
-        self.right_centerline_pub_.publish(right_path)
-        
         arr = DetectionArray()
         arr.header = header
         for box, s, l in zip(frame_boxes, scores, labels):
@@ -278,28 +249,7 @@ class Vision(Node):
         msg.row_step = 12 * pc_np.shape[0]         
         msg.is_dense = True
         msg.data = pc_np.astype(np.float32).tobytes()
-        return msg 
-
-    def xy_to_path(self, xy, header):
-        path = Path()
-        path.header = header
-
-        if xy is None or len(xy) == 0:
-            return path
-
-        if xy is not None:
-            xy = xy.cpu().numpy()
-            
-            for pt in xy:
-                pose = PoseStamped()
-                pose.header = header
-                pose.pose.position.x = float(pt[0])
-                pose.pose.position.y = float(pt[1])
-                pose.pose.position.z = 0.0
-                pose.pose.orientation.w = 1.0 
-                path.poses.append(pose)
-        
-        return path
+        return msg
 
 
 def main(args=None):
