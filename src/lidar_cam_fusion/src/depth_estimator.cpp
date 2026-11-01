@@ -291,6 +291,17 @@ std::string camera_frame;
             result.distance = depths[index];
             set_position(result, 0.5 * (b.x1 + b.x2), 0.5 * (b.y1 + b.y2), result.distance); 
         }
+        else if (have_ground) {
+            // no usable LiDAR points: ground-plane distance from the bottom-center of the box
+            float depth = 0.0f;
+            double u = 0.5 * (b.x1 + b.x2);
+            double v = b.y2;
+            if (ipm_depth(u, v, ipm_origin, ipm_R, depth)) {
+                result.distance = depth;
+                set_position(result, u, v, depth);
+                result.depth_valid = true;
+            }
+        }
         output.detections.push_back(result);
     }
 

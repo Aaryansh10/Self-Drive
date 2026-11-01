@@ -16,7 +16,8 @@ find_package(geometry_msgs REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(vision_interfaces REQUIRED)
 find_package(fusion_interfaces REQUIRED)    
-find_package(Eigen3 REQUIRED)               
+find_package(Eigen3 REQUIRED)
+find_package(visualization_msgs REQUIRED)               
 
 if(BUILD_TESTING)
   find_package(ament_lint_auto REQUIRED)
@@ -47,6 +48,7 @@ ament_target_dependencies(in_lane_filter
   geometry_msgs
   sensor_msgs
   vision_interfaces
+  visualization_msgs
 )
 
 add_executable(obstacle_memory src/obstacle_memory.cpp)
