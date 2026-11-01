@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <cmath>
+#include <chrono>
 #include <deque>
 #include <limits>
 #include <memory>
@@ -18,11 +19,11 @@
 
 using det = vision_interfaces::msg::DetectionArray;
 
-namespace stop {
+namespace igvc_stop {
     using Stop = stop_interfaces::action::Stop;
     using GoalHandle = rclcpp_action::ServerGoalHandle<Stop>;
 
-    enum class State {MONITORING, BRAKING, STOP};
+    enum class State {MONITORING, BRAKING, STOPPED};
 
     static const char * state_name(State s){
         switch(s) {
@@ -47,17 +48,25 @@ namespace stop {
             load_parameters();
 
             const auto qos = rclcpp::SensorDataQoS();
-            det_sub = this->create_subscription<det>("detection_topic", qos, std::bind(&StopActionServer::detection_callback,this, std::placeholders::_1));
-            odom_sub = this->create_subscription<nav_msgs::msg::Odometry>("odom_topic", qos, std::bind(&StopActionServer::odom_callback,this, std::placeholders::_1));
-            cmd_pub = this->create_publisher<geometry_msgs::msg::Twist>("cmd_vel_topic", 10);
+            det_sub = this->create_subscription<det>(detection_topic, qos, std::bind(&StopActionServer::detection_callback,this, std::placeholders::_1));
+            odom_sub = this->create_subscription<nav_msgs::msg::Odometry>(odom_topic, qos, std::bind(&StopActionServer::odom_callback,this, std::placeholders::_1));
+            cmd_pub = this->create_publisher<geometry_msgs::msg::Twist>(cmd_vel_topic, 10);
 
             action_server = rclcpp_action::create_server<Stop>(this, "stop", std::bind(&StopActionServer::handle_goal, this, std::placeholders::_1, std::placeholders::_2), std::bind(&StopActionServer::handle_cancel, this, std::placeholders::_1), std::bind(&StopActionServer::handle_accepted, this, std::placeholders::_1));
-            timer = create_wall_timer(std::chrono::duration<double>(1.0/control_rate_hz), std::bind(&StopActionServer::timer_callback, this));
+            timer = rclcpp::create_timer(this, get_clock(), rclcpp::Duration::from_seconds(1.0 / control_rate_hz), std::bind(&StopActionServer::control_loop, this));
 
             RCLCPP_INFO(get_logger(), "Stop action server ready: %zu profile(s), a_comfort=%.2f a_max=%.2f t_lat=%.2f", profiles.size(), a_comfort, a_max, t_lat);
         }
 
         private:
+
+
+        struct Candidate {
+            std::string name;
+            double d;
+            double gap;
+        };
+
         void declare_parameters() {
             declare_parameter<std::string>("detection_topic", "/obstacle_detections");
             declare_parameter<std::string>("odom_topic", "/odom");
@@ -127,8 +136,8 @@ namespace stop {
             last_x = x;
             last_y = y;
             have_odom = true;
-            v_ = msg->twist.twist.linear.x;
-            w_ = msg->twist.twist.angular.z;
+            v_meas = msg->twist.twist.linear.x;
+            w_meas = msg->twist.twist.angular.z;
         }
 
         void detection_callback(const det::SharedPtr msg) {
@@ -143,12 +152,12 @@ namespace stop {
             if (profiles.find(msg->class_name) == profiles.end()) 
             return;
 
-            const auto now=Time.now();
+            const auto now = this->now();
             auto &t = tracks[msg->class_name];
             if ((now - t.stamp).seconds() > det_timeout)
             t.obstacle_s.clear();
             t.obstacle_s.push_back(odometer + static_cast<double>(msg->distance) - sensor_offset);
-            while (static_cast<int>(t_obstacle_s.size()) > filter_window) {
+            while (static_cast<int>(t.obstacle_s.size()) > filter_window) {
                 t.obstacle_s.pop_front();
             }
             t.filtered_s = median(std::vector<double>(t.obstacle_s.begin(), t.obstacle_s.end()));
@@ -176,7 +185,7 @@ namespace stop {
         rclcpp_action::CancelResponse handle_cancel(const std::shared_ptr<GoalHandle>) {
             return rclcpp_action::CancelResponse::ACCEPT;
         }
-        }
+        
 
         void handle_accepted(const std::shared_ptr<GoalHandle> gh) {
             goal_handle = gh;
@@ -188,18 +197,14 @@ namespace stop {
             trigger_speed = 0.0;
             trigger_odometer = 0.0;
             brake_class.clear();
-            last_tick = this.now();
-            last_feedback = this.now();
+            last_distance = 0.0;
+            tracks.clear();
+            last_tick = this->now();
+            last_feedback = this->now();
             RCLCPP_INFO(get_logger(), "Goal accepted(hold_time=%.1f s, target_class='%s')", hold_time, target_class.c_str());
         }
 
         //Control Loop
-
-        struct Candidate {
-            std::string name;
-            double d;
-            double gap;
-        };
 
         std::vector<Candidate> collect_candidates(double max_age) const {
             std::vector<Candidate> out;
@@ -217,9 +222,9 @@ namespace stop {
         void publish_cmd(double v_cmd) {
             geometry_msgs::msg::Twist cmd;
             cmd.linear.x = v_cmd;
-            const double v = std::fabs(v_);
+            const double v = std::fabs(v_meas);
             if (v > 0.1) {
-                cmd.angular.z = w_ * std::min(1.0, v_cmd/v);
+                cmd.angular.z = w_meas * std::min(1.0, v_cmd/v);
             }
             cmd_pub->publish(cmd);
         }
@@ -248,23 +253,152 @@ namespace stop {
         void control_loop() {
             if (!goal_handle || !have_odom)
             return ;
-            const auto now = this->now;
-            const double dt = std::clamp((now - last_tick).seconds, 1e-3, 0.5);
+            const auto now = this->now();
+            const double dt = std::clamp((now - last_tick).seconds(), 1e-3, 0.5);
             last_tick = now;
 
-            if(goal_handle->is_canceling) {
+            if(goal_handle->is_canceling()) {
                 finish(false, "cancelled", last_distance);
                 return;
             }
 
-            const double v = std::fabs(v);
+            const double v = std::fabs(v_meas);
             Stop::Feedback fb;
             fb.class_name = brake_class;
+
+            if(state == State::MONITORING) {
+                const auto cands = collect_candidates(det_timeout);
+                double worst_margin = std::numeric_limits<double>::infinity();
+                const Candidate * trigger = nullptr;
+                double trigger_dist = 0.0;
+                for (const auto & c : cands) {
+                    const double trig = trigger_distance(v, a_comfort, t_lat, c.gap);
+                    const double margin = c.d - trig;
+                    if (margin < worst_margin) {
+                        worst_margin = margin;
+                        trigger = &c;
+                        trigger_dist = trig;
+                    }
+                    const double vmax = profiles.at(c.name).max_speed;
+                    if (v > vmax) {
+                        RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000, "Speed %.2f m/s exceeds profile '%s' max_speed %.2f: stop window not guaranteed",
+            v, c.name.c_str(), vmax);
+                    }
+                }
+                if(trigger) {
+                    fb.class_name = trigger->name;
+                    fb.distance = static_cast<float>(trigger->d);
+                    fb.trigger_distance = static_cast<float>(trigger_dist);
+                    last_distance = trigger->d;
+                    if (worst_margin <= 0.0) {
+                        state = State::BRAKING;
+                        brake_class = trigger->name;
+                        v_cmd = v;
+                        trigger_speed = v;
+                        trigger_odometer = odometer;
+                        RCLCPP_INFO(get_logger(), "Brake trigger: %s at %.2f m (trigger %.2f m), speed %.2f m/s",
+            brake_class_.c_str(), trigger->d, trigger_dist, v);
+                    }
+                }
+            }
+
+            if(state == State::BRAKING) {
+                const auto cands = collect_candidates(dr_timeout);
+                double v_ref = std::numeric_limits<double>::infinity();
+                const Candidate * nearest = nullptr;
+                for(const auto & c : cands) {
+                    const double r = reference_speed(c.d, v, a_comfort, t_lat, c.gap);
+                    if (r < v_ref) {
+                        v_ref = r;
+                        nearest = &c;
+                    }
+                }
+                if (!nearest) {
+                    v_ref = v_cmd - a_comfort * dt;
+                }
+                else {
+                    fb.class_name = nearest->name;
+                    fb.distance = static_cast<float>(nearest->d);
+                    last_distance = nearest->d;
+                }
+                v_cmd = next_command(v_cmd, v_ref, a_max, dt);
+                publish_cmd(v_cmd);
+
+                if(v < v_stop && v_cmd < v_stop) {
+                    state = State::STOPPED;
+                    stopped_at = now;
+                    v_cmd = 0.0;
+                    RCLCPP_INFO(get_logger(), "Stopped: gap %.2f m, stopping distance %.2f m",
+          last_distance, odometer - trigger_odometer);
+                }
+            }
+
+            else if(state == State::STOPPED) {
+                v_cmd = 0.0;
+                publish_cmd(0.0);
+                fb.distance = static_cast<float>(last_distance);
+                if((now - stopped_at).seconds() >= hold_time) {
+                    finish(true, "stopped", last_distance);
+                    return;
+                }
+            }
+
+            if((now - last_feedback).seconds() >= 0.1) {
+                last_feedback = now;
+                auto msg = std::make_shared<Stop::Feedback>(fb);
+                msg->state = state_name(state);
+                msg->speed = static_cast<float>(v);
+                msg->cmd_speed = static_cast<float>(v_cmd);
+                goal_handle->publish_feedback(msg);
+            }
+        }
+
+        //parameters
+        std::string detection_topic, odom_topic, cmd_vel_topic;
+        double control_rate_hz{20.0}, a_comfort{1.0}, a_max{2.5}, t_lat{0.15};
+        double target_fraction{0.5}, v_stop{0.03}, sensor_offset{0.0};
+        double det_timeout{0.5}, dr_timeout{3.0}, min_score{0.3};
+        int filter_window{5};
+        bool require_in_lane{true};
+        std::unordered_map<std::string, Profile> profiles;
+
+        //odometry
+        bool have_odom{false};
+        double last_x{0.0}, last_y{0.0}, odometer{0.0}, v_meas{0.0}, w_meas{0.0};
+
+        //detections
+        std::unordered_map<std::string, Track> tracks;
+
+        //goal state
+        std::shared_ptr<GoalHandle> goal_handle;
+        State state{State::MONITORING};
+        double hold_time{0.0}, v_cmd{0.0}, trigger_speed{0.0}, trigger_odometer{0.0}, last_distance{0.0};
+        std::string target_class, brake_class;
+        rclcpp::Time last_tick{0, 0, RCL_ROS_TIME}, last_feedback{0, 0, RCL_ROS_TIME}, stopped_at{0, 0, RCL_ROS_TIME};
+
+        //ROS handles
+        rclcpp::Subscription<det>::SharedPtr det_sub;
+        rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub;
+        rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr cmd_pub;
+        rclcpp_action::Server<Stop>::SharedPtr action_server;
+        rclcpp::TimerBase::SharedPtr timer;
+
+};
+
+}
+
+int main(int argc, char ** argv)
+{
+  rclcpp::init(argc, argv);
+  rclcpp::spin(std::make_shared<igvc_stop::StopActionServer>());
+  rclcpp::shutdown();
+  return 0;
+}
+
+
 
             
 
 
-        }
 
-
-    }
+    

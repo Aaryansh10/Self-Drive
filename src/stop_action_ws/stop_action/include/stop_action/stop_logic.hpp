@@ -1,6 +1,7 @@
 #pragma once
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
 #include <vector>
 
 namespace igvc_stop
@@ -34,7 +35,7 @@ namespace igvc_stop
 
     inline double median(std::vector<double> v) {
         if (v.empty()) return 0.0;
-        const auto mid = v.begin() + static_cast<std::ptrdiff_t>(v.size() / 2.0);
+        const auto mid = v.begin() + static_cast<std::ptrdiff_t>(v.size() / 2);
         std::nth_element(v.begin(), mid, v.end());
         return *mid;
     }
