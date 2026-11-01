@@ -1,5 +1,13 @@
 // BT nodes for bt. To add a new behaviour (intersection, parking) copy LaneChange below:
 // one small class per action server, then register it in bt_executor.cpp and use it in trees/main.xml.
+
+//each new behaviour
+//A small RosActionNode class in nodes.hpp (copy of LaneChange).
+//Register it in bt_executor.cpp.
+//Add a branch in main.xml. 
+//Add its parameters to bt.yaml.
+//Add its interface package to CMakeLists.txt and package.xml.
+
 #pragma once
 #include <chrono>
 #include <cmath>
