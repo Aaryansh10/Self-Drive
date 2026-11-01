@@ -16,6 +16,7 @@ from cv_bridge import CvBridge
 from vision_py.architectures.hydra_net.model import build_hydranet
 from vision_py.ipm import project_pixels_np
 from vision_py.model_helpers import load_weights, preprocess, postprocess_detections, clean_mask_np
+import vision_py.thinning as thinning_mod
 from vision_py.thinning import zhang_suen_thinning, order_skeleton_pixels, enable_fused_thinning
 
 
@@ -50,6 +51,12 @@ class StageProfiler:
         self.sums[name] = self.sums.get(name, 0.0) + dt
         self.maxs[name] = max(self.maxs.get(name, 0.0), dt)
         self.t = now
+
+    def note(self, name, value):
+        if not self.enabled:
+            return
+        self.sums[name] = self.sums.get(name, 0.0) + value
+        self.maxs[name] = max(self.maxs.get(name, 0.0), value)
 
     def end(self):
         if not self.enabled:
@@ -111,6 +118,12 @@ class Vision(Node):
         self.declare_parameter("nms_iou", 0.5)
         self.declare_parameter("max_detections", 50)
         self.declare_parameter("mask_alpha", 0.45)
+        # Rows above this (full-res) row are not thinned. The IPM drops them anyway:
+        #   v_min = cy + fy*tan(atan(cam_height/max_range) - cam_pitch - pitch_margin)
+        # = 272.5 + 343.25*tan(0.198 - 0.4 - 0.1) ~ 166 for your camera, so 160 is safe. 0 disables.
+        # Re-derive it if you change cam_pitch / cam_height / max_range / intrinsics.
+        self.declare_parameter("thin_row_start", 160)
+        self.declare_parameter("thin_cuda_graph", True)   # replay thinning as CUDA graphs (removes launch overhead)
         self.declare_parameter("fused_thinning", True)   # torch.compile fused thinning (slow ~10-40 s startup, then ~10x faster)
         self.declare_parameter("cpu_threads", 3)         # parallel mask cleaning (OpenCV releases the GIL)
         self.declare_parameter("profile_timing", True)   # per-stage timing log (adds GPU syncs; turn off in production)
@@ -146,6 +159,7 @@ class Vision(Node):
         self.mask_alpha = self.get_parameter("mask_alpha").value
         self.prof = StageProfiler(self.get_parameter("profile_timing").value,
                                   self.get_parameter("profile_period").value, self.get_logger())
+        self.thin_r0 = (int(self.get_parameter("thin_row_start").value) + self.subsample_step - 1) // self.subsample_step
         n_threads = int(self.get_parameter("cpu_threads").value)
         self.pool = ThreadPoolExecutor(max_workers=n_threads) if n_threads > 1 else None
 
@@ -214,10 +228,11 @@ class Vision(Node):
             for _ in range(3):
                 self.model(dummy)
         s = self.subsample_step
-        hw = ((H + s - 1) // s, (W + s - 1) // s)
+        hw = ((H + s - 1) // s - self.thin_r0, (W + s - 1) // s)   # thinned window (rows >= thin_r0)
         if self.get_parameter("fused_thinning").value:
             self.get_logger().info("Compiling fused thinning kernels (one-off, may take up to a minute)...")
-            enable_fused_thinning(self.device, hw, self.get_logger().info)
+            enable_fused_thinning(self.device, hw, self.get_logger().info,
+                                  use_graph=self.get_parameter("thin_cuda_graph").value)
         zhang_suen_thinning(torch.zeros(2, *hw, dtype=torch.bool, device=self.device))
         torch.cuda.synchronize()
 
@@ -262,12 +277,16 @@ class Vision(Node):
         self.prof.mark("masks")
 
         # Thin both lane masks in one GPU batch, then ONE transfer back for both skeletons.
-        skel_in = torch.from_numpy(np.stack([mask_whitelane, mask_yellow])).to(self.device)
+        r0 = self.thin_r0
+        skel_in = torch.from_numpy(np.stack([mask_whitelane[r0:], mask_yellow[r0:]])).to(self.device)
         skel = zhang_suen_thinning(skel_in).cpu().numpy()
         self.prof.mark("thinning")
 
         v_w, u_w = order_skeleton_pixels(skel[0])
         v_y, u_y = order_skeleton_pixels(skel[1])
+        v_w += r0                                  # back to full-mask row coordinates
+        v_y += r0
+        self.prof.note("thin_iters", thinning_mod.last_iters)
         v_s, u_s = leading_edge_extraction(mask_stopline)
         self.prof.mark("order_skeleton")
 

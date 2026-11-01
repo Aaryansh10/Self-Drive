@@ -139,11 +139,13 @@ def _corners(img):
     return img
 
 
+last_iters = 0   # iterations used by the last fused call (for profiling; no GPU sync)
 _fused = None   # (compiled_iter, compiled_corners) once enable_fused_thinning() succeeds
 
 
 @torch.no_grad()
-def _thin_fused(masks, max_iter=64, check_every=4):
+def _thin_fused(masks, max_iter=64, check_every=2):
+    global last_iters
     it_fn, corner_fn = _fused
     img = (masks > 0).to(torch.uint8)
     prev = torch.count_nonzero(img)
@@ -154,15 +156,77 @@ def _thin_fused(masks, max_iter=64, check_every=4):
             if bool(cur == prev):
                 break
             prev = cur
+    last_iters = it + 1
     return corner_fn(img) > 0
 
 
-def enable_fused_thinning(device, hw, log=print):
+# ----------------------------------------------------------------------------
+# CUDA-graph path
+#
+# ~37 iterations x several tiny kernels, each launched from Python (Triton launcher + guard
+# checks, ~100 us apiece) made thinning CPU/launch-bound: shrinking the image by 30% saved only
+# 7% of the time. We record a chunk of K iterations (and the corner pass) into CUDA graphs once,
+# then replay each with a single launch. Early exit is kept at chunk granularity.
+# ----------------------------------------------------------------------------
+_graph = None   # dict(shape, buf, chunk, corner, K) once capture succeeded
+
+
+def _capture_graphs(shape, device, K):
+    it_fn, corner_fn = _fused
+    buf = torch.zeros(shape, dtype=torch.uint8, device=device)
+
+    def chunk():
+        x = buf
+        for _ in range(K):
+            x = it_fn(x)
+        buf.copy_(x)
+
+    def corners():
+        buf.copy_(corner_fn(buf))
+
+    graphs = []
+    for fn in (chunk, corners):
+        side = torch.cuda.Stream()
+        side.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(side):                       # warm up outside capture
+            for _ in range(2):
+                fn()
+        torch.cuda.current_stream().wait_stream(side)
+        torch.cuda.synchronize()
+        g = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(g):
+            fn()
+        graphs.append(g)
+    return dict(shape=tuple(shape), buf=buf, chunk=graphs[0], corner=graphs[1], K=K)
+
+
+@torch.no_grad()
+def _thin_graphed(masks, max_iter=64):
+    global last_iters
+    gr = _graph
+    buf, K = gr["buf"], gr["K"]
+    buf.copy_(masks > 0)
+    prev = torch.count_nonzero(buf)
+    done = 0
+    while done < max_iter:
+        gr["chunk"].replay()
+        done += K
+        cur = torch.count_nonzero(buf)
+        if bool(cur == prev):                               # one sync per chunk
+            break
+        prev = cur
+    gr["corner"].replay()
+    last_iters = done
+    return buf > 0                                          # new tensor; buf is reused next call
+
+
+def enable_fused_thinning(device, hw, log=print, use_graph=True, graph_chunk=8):
     """Compile the fused kernels (takes ~10-40 s once, at startup), then verify them against the
     conv implementation on a synthetic mask with thick vertical, horizontal and diagonal bands.
     Any failure (no Triton, no C compiler, mismatch) leaves the conv path active. Returns bool."""
-    global _fused
+    global _fused, _graph
     _fused = None
+    _graph = None
     if torch.device(device).type != "cuda":
         return False
     try:
@@ -192,14 +256,33 @@ def enable_fused_thinning(device, hw, log=print):
         if t_f >= t_c:
             _fused = None
             log("[thinning] fused path not faster; using conv path")
-        return _fused is not None
+            return False
+        if use_graph:
+            try:
+                _graph = _capture_graphs((2, H, W), device, graph_chunk)
+                out = zhang_suen_thinning(m)
+                torch.cuda.synchronize()
+                if not torch.equal(out, ref):
+                    raise RuntimeError(f"graph result differs from conv result in {int((out != ref).sum())} px")
+                t3 = time.perf_counter()
+                for _ in range(10):
+                    zhang_suen_thinning(m)
+                torch.cuda.synchronize(); t_g = (time.perf_counter() - t3) / 10 * 1e3
+                log(f"[thinning] CUDA graph active: {t_g:.2f} ms (iterations run: {last_iters})")
+                if t_g >= t_f:
+                    _graph = None
+                    log("[thinning] graph not faster; using un-graphed fused path")
+            except Exception as e:                          # noqa: BLE001
+                _graph = None
+                log(f"[thinning] CUDA graph disabled, using un-graphed fused path: {e}")
+        return True
     except Exception as e:                                  # noqa: BLE001
         _fused = None
         log(f"[thinning] fused path disabled, using conv path: {e}")
         return False
 
 
-def zhang_suen_thinning(masks: torch.Tensor, max_iter: int = 64, check_every: int = 4):
+def zhang_suen_thinning(masks: torch.Tensor, max_iter: int = 64, check_every: int = 2):
     """
     masks: (N, H, W) bool/uint8 tensor on any device (N masks thinned in one batch).
     max_iter: must exceed half the thickest line in pixels (each iteration peels 1px
@@ -208,6 +291,8 @@ def zhang_suen_thinning(masks: torch.Tensor, max_iter: int = 64, check_every: in
     original implementation. Uses the fused kernels if enable_fused_thinning() succeeded.
     """
     if _fused is not None and masks.is_cuda:
+        if _graph is not None and tuple(masks.shape) == _graph["shape"]:
+            return _thin_graphed(masks, max_iter)
         return _thin_fused(masks, max_iter, check_every)
     return _thin_conv(masks, max_iter, check_every)
 
