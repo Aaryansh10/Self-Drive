@@ -4,16 +4,34 @@ import torch
 import torch.nn.functional as F
 from torchvision.ops import batched_nms
 
-def preprocess(
-        img_bgr, device='cuda', use_fp16=False,
-        mean=np.array([0.485, 0.456, 0.406] ,dtype=np.float32).reshape(1, 1, 3), 
-        std=np.array([0.229, 0.224, 0.225], dtype=np.float32).reshape(1, 1, 3),
-    ):
-    img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
-    x = (img_rgb.astype(np.float32) / 255.0 - mean) / std
-    x = torch.from_numpy(x).permute(2, 0, 1).unsqueeze(0).contiguous()
-    x = x.to(device)
-    return x.half() if use_fp16 else x
+_MEAN = (0.485, 0.456, 0.406)
+_STD = (0.229, 0.224, 0.225)
+_norm_cache = {}
+
+
+def _norm_consts(device):
+    """(x/255 - mean)/std folded into one multiply-add: x * scale - bias."""
+    key = str(device)
+    if key not in _norm_cache:
+        mean = torch.tensor(_MEAN, dtype=torch.float32, device=device).view(1, 3, 1, 1)
+        std = torch.tensor(_STD, dtype=torch.float32, device=device).view(1, 3, 1, 1)
+        _norm_cache[key] = (1.0 / (255.0 * std), mean / std)
+    return _norm_cache[key]
+
+
+def preprocess(img_bgr, device='cuda', use_fp16=False, channels_last=False):
+    """Uploads the raw uint8 BGR frame (1.5 MB) and does BGR->RGB, float conversion and
+    normalisation on the GPU. The old version did this in float32 on the CPU (~9 ms)
+    and uploaded 6 MB."""
+    scale, bias = _norm_consts(device)
+    t = torch.from_numpy(np.ascontiguousarray(img_bgr)).to(device)    # (H, W, 3) uint8
+    x = t.permute(2, 0, 1).unsqueeze(0).flip(1)                       # (1, 3, H, W), RGB
+    x = x.float().mul_(scale).sub_(bias)
+    if use_fp16:
+        x = x.half()
+    fmt = torch.channels_last if channels_last else torch.contiguous_format
+    return x.contiguous(memory_format=fmt)
+
 
 def load_weights(model, weights):
     if not weights:
@@ -21,7 +39,7 @@ def load_weights(model, weights):
         return
 
     ckpt = torch.load(weights, map_location="cpu", weights_only=False)
-        
+
     def is_state_dict(d):
         return isinstance(d, dict) and len(d) > 0 and all(torch.is_tensor(v) for v in d.values())
 
@@ -33,8 +51,8 @@ def load_weights(model, weights):
     elif isinstance(ckpt, dict):
         print(f"Checkpoint top-level keys: {list(ckpt.keys())}")
         preferred = (
-            "ema", "ema_state_dict", "model_state_dict", 
-            "state_dict","model_state", "model", "net", "weights"
+            "ema", "ema_state_dict", "model_state_dict",
+            "state_dict", "model_state", "model", "net", "weights"
         )
         for key in list(preferred) + list(ckpt.keys()):
             v = ckpt.get(key)
@@ -57,116 +75,97 @@ def load_weights(model, weights):
     else:
         print(msg)
 
+
+_EMPTY = (np.zeros((0, 4), dtype=np.float32), np.zeros(0, dtype=np.float32), np.zeros(0, dtype=np.int64))
+
+
 @torch.no_grad()
 def postprocess_detections(det, scale_xy, frame_wh, score_thresh, nms_iou, max_detections):
+    """FCOS-style: score = sqrt(cls_prob * centerness_prob), class-wise NMS.
+    Returns (frame_boxes (n,4), scores (n,), labels (n,)) as numpy arrays.
+    (model_boxes is no longer returned; nothing used it.) One GPU->CPU transfer."""
     class_logits = det["cls_logits"][0].float().sigmoid()  # (N, C)
-    centreness = det["centerness"][0].float().sigmoid()  # (N, 1)
-    boxes = det["boxes"][0].float()  # (N, 4) xyxy, input px
+    centreness = det["centerness"][0].float().sigmoid()    # (N, 1)
+    boxes = det["boxes"][0].float()                        # (N, 4) xyxy, input px
     num_classes = class_logits.shape[1]
 
-    def empty():
-        return (
-            boxes.new_zeros((0, 4)),
-            np.zeros((0, 4), dtype=np.float32),
-            np.zeros(0, dtype=np.float32),
-            np.zeros(0, dtype=np.int64),
-        )
-
-    scores = (class_logits * centreness).sqrt()  # (N, C)
-    flat = scores.flatten()
-    idx = (flat > score_thresh).nonzero(as_tuple=True)[0]
+    flat = (class_logits * centreness).sqrt().flatten()
+    idx = (flat > score_thresh).nonzero(as_tuple=True)[0]  # the one unavoidable sync (dynamic shape)
     if idx.numel() == 0:
-        return empty()
+        return _EMPTY
 
-    if idx.numel() > 1000: # pre-NMS top-k
+    if idx.numel() > 1000:  # pre-NMS top-k
         idx = idx[flat[idx].topk(1000).indices]
 
     anchor_idx = idx // num_classes
     labels = idx % num_classes
-    selected_boxes, selected_scores = boxes[anchor_idx], flat[idx]
+    sel_boxes, sel_scores = boxes[anchor_idx], flat[idx]
 
-    k = batched_nms(selected_boxes, selected_scores, labels, nms_iou)[: max_detections]
-    model_boxes, selected_scores, labels = selected_boxes[k], selected_scores[k], labels[k]
+    k = batched_nms(sel_boxes, sel_scores, labels, nms_iou)[:max_detections]
+    sel_boxes, sel_scores, labels = sel_boxes[k], sel_scores[k], labels[k]
 
-    # rescale to original frame (separate copy; model_boxes stays in model space)
     sx, sy = scale_xy
     fw, fh = frame_wh
-    frame_boxes = model_boxes.clone()
-    frame_boxes[:, [0, 2]] = (frame_boxes[:, [0, 2]] * sx).clamp(0, fw - 1)
-    frame_boxes[:, [1, 3]] = (frame_boxes[:, [1, 3]] * sy).clamp(0, fh - 1)
+    fb = torch.empty_like(sel_boxes)
+    fb[:, [0, 2]] = (sel_boxes[:, [0, 2]] * sx).clamp(0, fw - 1)
+    fb[:, [1, 3]] = (sel_boxes[:, [1, 3]] * sy).clamp(0, fh - 1)
 
-    # drop boxes that collapsed after clamping
-    valid = ((frame_boxes[:, 2] - frame_boxes[:, 0]) > 2) & ((frame_boxes[:, 3] - frame_boxes[:, 1]) > 2)
-    if not valid.any():
-        return empty()
+    # drop boxes that collapsed after clamping; filter on the CPU so there is no extra sync
+    pack = torch.cat([fb, sel_scores[:, None], labels[:, None].float()], dim=1).cpu().numpy()
+    valid = ((pack[:, 2] - pack[:, 0]) > 2) & ((pack[:, 3] - pack[:, 1]) > 2)
+    pack = pack[valid]
+    if pack.shape[0] == 0:
+        return _EMPTY
+    return pack[:, :4], pack[:, 4], pack[:, 5].astype(np.int64)
 
-    model_boxes = model_boxes[valid]
-    frame_boxes = frame_boxes[valid]
-    selected_scores = selected_scores[valid]
-    labels = labels[valid]
 
-    return (
-        model_boxes,
-        frame_boxes.cpu().numpy(),
-        selected_scores.cpu().numpy(),
-        labels.cpu().numpy(),
-    )
+# ----------------------------------------------------------------------------
+# Mask cleaning (CPU / OpenCV)
+#
+# The GPU version needed ~100+ tiny kernels and a host sync per label-propagation
+# iteration, for each of 3 masks. A 544x960 uint8 mask is only 0.5 MB, so one transfer
+# plus OpenCV's connected-components is far cheaper. Semantics are identical:
+# open -> close -> drop 8-connected components with area < min_area or
+# perimeter < min_perimeter (perimeter = pixels removed by a 3x3 erosion).
+# Borders behave the same as max_pool2d's implicit -inf padding (no erosion at the edge).
+# ----------------------------------------------------------------------------
+_se_cache = {}
 
-def dilate(mask, k):
-    return F.max_pool2d(mask, k, stride=1, padding=k // 2)
 
-def erode(mask, k):
-    return -F.max_pool2d(-mask, k, stride=1, padding=k // 2)
+def _se(k):
+    if k not in _se_cache:
+        _se_cache[k] = cv2.getStructuringElement(cv2.MORPH_RECT, (k, k))
+    return _se_cache[k]
 
-def label_components(mask: torch.Tensor, max_iters: int = 48) -> torch.Tensor:
-    """
-    mask: (H, W) bool on GPU. Returns a flat float32 label map (H*W,), 0 = background.
-    Max-label propagation over 8-neighbours plus pointer jumping, which converges in
-    far fewer iterations than plain propagation, even on long lanes.
-    """
-    H, W = mask.shape
-    fg = mask.reshape(-1).float()
-    labels = torch.arange(1, H * W + 1, device=mask.device, dtype=torch.float32) * fg
-    zero = labels.new_zeros(1)
-    for _ in range(max_iters):
-        prev = labels
-        nb = F.max_pool2d(labels.view(1, 1, H, W), 3, 1, 1).view(-1) * fg
-        # jump: replace each label by the label of the pixel whose id it holds
-        labels = torch.cat([zero, nb])[nb.long()]
-        if torch.equal(labels, prev):
-            break
-    return labels
 
-def clean_mask(
-    mask: torch.Tensor,
-    open_k: int = 3,
-    close_k: int = 5,
-    min_area: int = 150,
-    min_perimeter: int = 50,
-) -> torch.Tensor:
-    """
-    mask: (H, W) bool on GPU, full resolution.
-    open -> close -> drop connected components with area < min_area or perimeter < min_perimeter.
-    """
-    H, W = mask.shape
-    m = mask[None, None].float()
+def clean_mask_np(mask, open_k=3, close_k=5, min_area=150, min_perimeter=50):
+    """mask: (H, W) bool or uint8 numpy array. Returns (H, W) bool numpy array."""
+    m = mask.view(np.uint8) if mask.dtype == np.bool_ else (mask > 0).astype(np.uint8)
+    if not m.any():
+        return np.zeros(m.shape, dtype=bool)
 
     if open_k > 1:                       # removes specks smaller than the kernel
-        m = dilate(erode(m, open_k), open_k)
+        m = cv2.morphologyEx(m, cv2.MORPH_OPEN, _se(open_k))
     if close_k > 1:                      # bridges small gaps in dashed or worn markings
-        m = erode(dilate(m, close_k), close_k)
+        m = cv2.morphologyEx(m, cv2.MORPH_CLOSE, _se(close_k))
+    if not m.any():
+        return np.zeros(m.shape, dtype=bool)
 
-    mb = m[0, 0] > 0.5
-    if not mb.any():
-        return mb
+    # connectedComponents is ~5x faster than ...WithStats, and everything below only touches
+    # foreground pixels (a few % of the frame) instead of the full 544x960 label map.
+    n, labels = cv2.connectedComponents(m, connectivity=8)
+    if n <= 1:
+        return np.zeros(m.shape, dtype=bool)
 
-    labels = label_components(mb).long()
-    n = H * W + 1
+    fg = m.view(np.bool_)                                      # m is strictly 0/1
+    lab_fg = labels[fg]
+    area = np.bincount(lab_fg, minlength=n)
 
-    boundary = mb & ~(erode(mb[None, None].float(), 3)[0, 0] > 0.5)
-    area = torch.bincount(labels, minlength=n)
-    perim = torch.bincount(labels[boundary.reshape(-1)], minlength=n)
+    boundary = (m - cv2.erode(m, _se(3))).view(np.bool_)       # m >= erode(m), so no underflow
+    perim = np.bincount(labels[boundary], minlength=n)
 
     keep = (area >= min_area) & (perim >= min_perimeter)
     keep[0] = False
-    return keep[labels].view(H, W)
+    out = np.zeros(m.shape, dtype=bool)
+    out[fg] = keep[lab_fg]
+    return out
