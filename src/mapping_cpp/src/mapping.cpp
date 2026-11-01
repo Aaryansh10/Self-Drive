@@ -1,5 +1,7 @@
+#include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <deque>
 #include <functional>
 #include <memory>
 #include <string>
@@ -30,8 +32,16 @@ class MappingNode : public rclcpp::Node {
             const auto map_topic = declare_parameter<std::string>("map_topic", "/lane_map/white");
             odom_frame_ = declare_parameter<std::string>("odom_frame", "odom");
             base_frame_ = declare_parameter<std::string>("base_frame", "link_base");
-            publish_every_ = declare_parameter<int>("publish_every", 3);
-            tf_timeout_ms_ = declare_parameter<int>("tf_timeout_ms", 50);
+            publish_every_ = std::max<int>(1, declare_parameter<int>("publish_every", 3));
+
+            // TF wait handling
+            // A synced cloud is held until TF for its stamp exists. If TF has not arrived
+            // after tf_max_wait_ms, the cloud is either dropped or (optionally) placed using
+            // the latest available pose.
+            tf_max_wait_ms_ = declare_parameter<int>("tf_max_wait_ms", 300);
+            tf_poll_ms_ = declare_parameter<int>("tf_poll_ms", 10);
+            max_pending_ = size_t(std::max<int>(1, declare_parameter<int>("max_pending", 20)));
+            fallback_to_latest_ = declare_parameter<bool>("fallback_to_latest", false);
 
             // Occupancy Grid Parameters
             lane_mapper::Params p;
@@ -58,10 +68,10 @@ class MappingNode : public rclcpp::Node {
             roi_x_max_ = p.roi_x_max;
             grid_ = std::make_unique<lane_mapper::LaneMapper>(p);
 
-            // TF
+            // TF (the listener spins its own thread, so the buffer fills independently of our executor)
             tf_buffer_ = std::make_unique<tf2_ros::Buffer>(get_clock());
-            tf_listener_ = std::make_unique<tf2_ros::TransformListener>(*tf_buffer_);  // own thread
-            
+            tf_listener_ = std::make_unique<tf2_ros::TransformListener>(*tf_buffer_);
+
             // Sync clouds
             sub_w_.subscribe(this, white_topic, rmw_qos_profile_sensor_data);
             sub_y_.subscribe(this, yellow_topic, rmw_qos_profile_sensor_data);
@@ -71,41 +81,106 @@ class MappingNode : public rclcpp::Node {
                 std::bind(&MappingNode::cb, this, std::placeholders::_1,
                 std::placeholders::_2, std::placeholders::_3)
             );
+
+            // Retries pending clouds once TF catches up, even if no new cloud arrives
+            drain_timer_ = create_wall_timer(
+                std::chrono::milliseconds(std::max<int>(1, tf_poll_ms_)),
+                std::bind(&MappingNode::drain, this));
+
             map_pub_ = create_publisher<nav_msgs::msg::OccupancyGrid>(map_topic, rclcpp::QoS(1).reliable());
             RCLCPP_INFO(get_logger(), "Mapping node started.");
         }
 
     private:
+        struct Pending {
+            PC2::ConstSharedPtr white, yellow, stop;
+        };
+
         std::string odom_frame_, base_frame_;
-        int publish_every_ = 3; 
-        int tf_timeout_ms_ = 50;
+        int publish_every_ = 3;
+        int tf_max_wait_ms_ = 300;
+        int tf_poll_ms_ = 10;
+        size_t max_pending_ = 20;
+        bool fallback_to_latest_ = false;
         unsigned frame_ = 0;
         double roi_x_min_ = 0.0;
         double roi_x_max_ = 0.0;
-        
+
         std::unique_ptr<lane_mapper::LaneMapper> grid_;
         std::vector<int8_t> buf_;
         lane_mapper::Window win_{};
-        
+
+        // Only touched from the node's executor (callback + timer). Add a mutex if you
+        // switch to a multi-threaded executor with a reentrant callback group.
+        std::deque<Pending> pending_;
+
         std::unique_ptr<tf2_ros::Buffer> tf_buffer_;
         std::unique_ptr<tf2_ros::TransformListener> tf_listener_;
         message_filters::Subscriber<PC2> sub_w_, sub_y_, sub_s_;
         std::shared_ptr<message_filters::Synchronizer<SyncPolicy>> sync_;
+        rclcpp::TimerBase::SharedPtr drain_timer_;
         rclcpp::Publisher<nav_msgs::msg::OccupancyGrid>::SharedPtr map_pub_;
 
         void cb(const PC2::ConstSharedPtr& white, const PC2::ConstSharedPtr& yellow, const PC2::ConstSharedPtr& stopline) {
-            // Pose of the robot at "Image" time and not "now". Inference latency would smear lines otherwise
-            geometry_msgs::msg::TransformStamped tf;
-            try {
-                tf = tf_buffer_->lookupTransform(
-                    odom_frame_, base_frame_, white->header.stamp,
-                    rclcpp::Duration(std::chrono::milliseconds(tf_timeout_ms_))
-                );
+            pending_.push_back({white, yellow, stopline});
+            while (pending_.size() > max_pending_) {
+                RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
+                    "Pending queue full (%zu), dropping oldest cloud (TF too slow?)", max_pending_);
+                pending_.pop_front();
             }
-            catch (const tf2::TransformException& e){
-                RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000, "TF lookup failed: %s", e.what());
-                return;
+            drain();
+        }
+
+        // Process queued clouds in order for as long as TF for their stamp is available.
+        void drain() {
+            while (!pending_.empty()) {
+                const Pending& p = pending_.front();
+                const auto stamp = p.white->header.stamp;
+                const tf2::TimePoint tp = tf2_ros::fromMsg(stamp);
+
+                std::string err;
+                if (tf_buffer_->canTransform(odom_frame_, base_frame_, tp, &err)) {
+                    // Pose of the robot at "Image" time and not "now". Inference latency would smear lines otherwise
+                    try {
+                        const auto tf = tf_buffer_->lookupTransform(odom_frame_, base_frame_, tp);
+                        process(p, tf);
+                    }
+                    catch (const tf2::TransformException& e) {
+                        RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000, "TF lookup failed: %s", e.what());
+                    }
+                    pending_.pop_front();
+                    continue;
+                }
+
+                // TF not available yet. Keep waiting until the cloud is too old to be useful.
+                const double age_ms = (now() - rclcpp::Time(stamp, get_clock()->get_clock_type())).seconds() * 1000.0;
+                if (age_ms <= tf_max_wait_ms_)
+                    break;  // preserve ordering: stop here and retry on next timer tick
+
+                if (fallback_to_latest_) {
+                    try {
+                        const auto tf = tf_buffer_->lookupTransform(odom_frame_, base_frame_, tf2::TimePointZero);
+                        RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
+                            "TF for stamp not available after %d ms, using latest pose: %s",
+                            tf_max_wait_ms_, err.c_str());
+                        process(p, tf);
+                    }
+                    catch (const tf2::TransformException& e) {
+                        RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
+                            "Fallback TF lookup failed: %s", e.what());
+                    }
+                } else {
+                    RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
+                        "Dropping cloud, TF unavailable after %d ms: %s", tf_max_wait_ms_, err.c_str());
+                }
+                pending_.pop_front();
             }
+        }
+
+        void process(const Pending& p, const geometry_msgs::msg::TransformStamped& tf) {
+            const auto& white = p.white;
+            const auto& yellow = p.yellow;
+            const auto& stopline = p.stop;
 
             const auto& t = tf.transform.translation;
             const auto& q = tf.transform.rotation;
@@ -123,20 +198,20 @@ class MappingNode : public rclcpp::Node {
                 if (!std::isfinite(x) || !std::isfinite(y))
                     continue;
                 if (x > roi_x_max_ || x < roi_x_min_)
-                continue;
+                    continue;
                 pts.push_back({x, y});
             }
 
-            // Sensor reliabilty check
+            // Sensor reliability check
             const int health = int(n + size_t(yellow->width) * yellow->height + size_t(stopline->width) * stopline->height);
-            
+
             grid_->insert(pts, pose, health);
-            
+
             if (++frame_ % publish_every_ != 0)
                 return;
 
             grid_->snapshot(buf_, win_);
-            
+
             nav_msgs::msg::OccupancyGrid msg;
             msg.header.stamp = white->header.stamp;
             msg.header.frame_id = odom_frame_;
