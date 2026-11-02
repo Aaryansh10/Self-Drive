@@ -18,6 +18,7 @@
 #include "behaviortree_ros2/bt_action_node.hpp"
 #include "bt/shared_state.hpp"
 #include "lane_change_interfaces/action/lane_change.hpp"
+#include "stop_interfaces/action/stop.hpp"
 #include "rclcpp/rclcpp.hpp"
 #include "std_msgs/msg/bool.hpp"
 
@@ -50,23 +51,73 @@ class DecideAction : public BT::SyncActionNode {
   Action last_ = Action::NONE;
 };
 
-// stop !!- not done 
-class StopRobot : public BT::SyncActionNode {
+// send stop goal ... if success the obstacle is marked handled, so the same obstacle can't trigger again.
+class StopRobot : public BT::RosActionNode<stop_interfaces::action::Stop> {
  public:
-  StopRobot(const std::string& name, const BT::NodeConfig& config) : BT::SyncActionNode(name, config) {}
-  static BT::PortsList providedPorts() { return {}; }
+  using StopAction = stop_interfaces::action::Stop;
 
-  BT::NodeStatus tick() override {
-    const auto t = std::chrono::steady_clock::now();
-    if (t - last_log_ > std::chrono::seconds(2)) {
-      RCLCPP_WARN(rclcpp::get_logger("bt"), "STOP requested but no stop action server found (placeholder)");
-      last_log_ = t;
+  StopRobot(const std::string& name, const BT::NodeConfig& conf, const BT::RosNodeParams& params,
+            std::shared_ptr<SharedState> state, double min_retry_s, double default_hold_time_s = 3.0)
+      : RosActionNode<StopAction>(name, conf, params),
+        state_(std::move(state)),
+        min_retry_(min_retry_s),
+        default_hold_time_(default_hold_time_s) {}
+
+  static BT::PortsList providedPorts() {
+    return providedBasicPorts({
+        BT::InputPort<int>("obstacle_id", -1, "obstacle that triggered this stop"),
+        BT::InputPort<double>("hold_time", -1.0, "override hold time at standstill (s); < 0 uses default")
+    });
+  }
+
+  // Called once when the node starts. Sends a goal only for an active STOP decision, and not while a
+  // recent FAILURE is still in its retry lockout. (A success never blocks the next, different obstacle.)
+  bool setGoal(Goal& goal) override {
+    if (state_->now() - last_fail_ < min_retry_) return false;
+    const Decision d = state_->current();
+    if (d.action != Action::STOP) return false;  // the obstacle went away before we could start
+    sent_ = d;                                   // remember exactly which obstacle this goal is for
+
+    double hold = default_hold_time_;
+    getInput("hold_time", hold);
+    if (hold < 0.0) hold = default_hold_time_;
+
+    goal.hold_time = static_cast<float>(hold);
+    goal.target_class = d.cls;  // filter to the class that triggered the decision (empty = any profiled class)
+    return true;
+  }
+
+  BT::NodeStatus onResultReceived(const WrappedResult& wr) override {
+    if (wr.result && wr.result->success) {
+      state_->mark_handled(sent_);  // handled only after the server confirmed success
+      RCLCPP_INFO(logger(),
+                  "stop done for obstacle %ld (%s): %s (final_dist=%.2f m, stop_dist=%.2f m, trig_speed=%.2f m/s)",
+                  sent_.obstacle_id, sent_.cls.c_str(), wr.result->message.c_str(), wr.result->final_distance,
+                  wr.result->stopping_distance, wr.result->trigger_speed);
+      return BT::NodeStatus::SUCCESS;
     }
+    last_fail_ = state_->now();
+    RCLCPP_WARN(logger(), "stop failed for obstacle %ld (%s): %s", sent_.obstacle_id, sent_.cls.c_str(),
+                (wr.result ? wr.result->message.c_str() : "no result"));
     return BT::NodeStatus::FAILURE;
   }
 
+  BT::NodeStatus onFailure(BT::ActionNodeErrorCode error) override {
+    if (error == BT::INVALID_GOAL) return BT::NodeStatus::FAILURE;  // lockout / no active obstacle: expected, quiet
+    last_fail_ = state_->now();
+    RCLCPP_WARN(logger(), "StopRobot: %s (retry in %.1f s)", BT::toStr(error), min_retry_);
+    return BT::NodeStatus::FAILURE;
+  }
+
+  // halt(): the wrapper cancels the goal for us; nothing was marked handled, so the obstacle can still trigger.
+  void onHalt() override { RCLCPP_DEBUG(logger(), "StopRobot halted"); }
+
  private:
-  std::chrono::steady_clock::time_point last_log_{};
+  std::shared_ptr<SharedState> state_;
+  double min_retry_;
+  double default_hold_time_;
+  double last_fail_ = -1e9;
+  Decision sent_;
 };
 
 // Default behaviour: tells path_bridge lane following is enabled while this node runs, disabled when it is halted.

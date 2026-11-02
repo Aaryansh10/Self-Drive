@@ -30,7 +30,7 @@ ament_target_dependencies(stop_action
   geometry_msgs
   nav_msgs
   stop_interfaces
-  vision_interfaces
+  fusion_interfaces
 )
 
 # 5. Install the executable to lib/stop_action

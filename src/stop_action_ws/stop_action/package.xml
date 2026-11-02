@@ -15,7 +15,7 @@
   <depend>geometry_msgs</depend>
   <depend>nav_msgs</depend>
   <depend>stop_interfaces</depend>
-  <depend>vision_interfaces</depend>
+  <depend>fusion_interfaces</depend>
 
   <!-- Runtime dependencies for your launch file -->
   <exec_depend>launch</exec_depend>

@@ -13,11 +13,11 @@
 #include "rclcpp/rclcpp.hpp"
 #include "rclcpp_action/rclcpp_action.hpp"
 #include "stop_interfaces/action/stop.hpp"
+#include "fusion_interfaces/msg/tracked_obstacle_array.hpp"
 #include "vision_interfaces/msg/detection_array.hpp"
 #include "stop_action/stop_logic.hpp"
 
-
-using det = vision_interfaces::msg::DetectionArray;
+using det = fusion_interfaces::msg::TrackedObstacleArray;
 
 namespace igvc_stop {
     using Stop = stop_interfaces::action::Stop;
@@ -29,13 +29,14 @@ namespace igvc_stop {
         switch(s) {
             case State::MONITORING : return "MONITORING";
             case State::BRAKING : return "BRAKING";
-            case State::STOP : return "STOP";
+            case State::STOPPED : return "STOPPED";
         }
         return "UNKNOWN";
     }
 
     struct Track {
         std::deque<double> obstacle_s;
+        std::string cls;
         rclcpp::Time stamp{0, 0, RCL_ROS_TIME};
         double filtered_s{0.0};
     };
@@ -72,6 +73,7 @@ namespace igvc_stop {
             declare_parameter<std::string>("odom_topic", "/odom");
             declare_parameter<std::string>("cmd_vel_topic", "/cmd_vel_stop");
             declare_parameter<double>("control_rate_hz", 20.0);
+            declare_parameter<double>("max_lateral_offset", 1.2);
             declare_parameter<double>("a_comfort", 1.0);
             declare_parameter<double>("a_max", 2.5);
             declare_parameter<double>("latency", 0.15);
@@ -91,6 +93,7 @@ namespace igvc_stop {
            odom_topic = get_parameter("odom_topic").as_string();
            cmd_vel_topic = get_parameter("cmd_vel_topic").as_string();
            control_rate_hz = get_parameter("control_rate_hz").as_double();
+           lm = get_parameter("max_lateral_offset").as_double();
            a_comfort = get_parameter("a_comfort").as_double();
            a_max = get_parameter("a_max").as_double();
            t_lat = get_parameter("latency").as_double();
@@ -140,28 +143,22 @@ namespace igvc_stop {
             w_meas = msg->twist.twist.angular.z;
         }
 
-        void detection_callback(const det::SharedPtr msg) {
-            if (have_odom == false)
-            return;
-            if (!msg->depth_valid || !std::isfinite(msg->distance) || msg->distance <= 0.0F) 
-            return;
-            if (require_in_lane && !msg->is_in_lane) 
-            return;
-            if (msg->score < min_score)
-            return;
-            if (profiles.find(msg->class_name) == profiles.end()) 
-            return;
-
-            const auto now = this->now();
-            auto &t = tracks[msg->class_name];
-            if ((now - t.stamp).seconds() > det_timeout)
-            t.obstacle_s.clear();
-            t.obstacle_s.push_back(odometer + static_cast<double>(msg->distance) - sensor_offset);
-            while (static_cast<int>(t.obstacle_s.size()) > filter_window) {
-                t.obstacle_s.pop_front();
+        void detection_callback(const det::SharedPtr m) {
+            if (!have_odom) return;
+            const auto n = this->now();
+            for (const auto &o : m->obstacles) {
+                if (profiles.find(o.class_name) == profiles.end()) continue;
+                if (std::fabs(o.position_base.y) > lm) continue;   // in-lane check
+                const double x = o.position_base.x;                // forward distance
+                if (!std::isfinite(x) || x <= 0.0) continue;
+                auto &t = tracks[static_cast<int>(o.id)];
+                t.cls = o.class_name;
+                if ((n - t.stamp).seconds() > det_timeout) t.obstacle_s.clear();
+                t.obstacle_s.push_back(odometer + x - sensor_offset);
+                while (static_cast<int>(t.obstacle_s.size()) > filter_window) t.obstacle_s.pop_front();
+                t.filtered_s = median(std::vector<double>(t.obstacle_s.begin(), t.obstacle_s.end()));
+                t.stamp = n;
             }
-            t.filtered_s = median(std::vector<double>(t.obstacle_s.begin(), t.obstacle_s.end()));
-            t.stamp = now;
         }
 
         //Action callbacks
@@ -201,20 +198,20 @@ namespace igvc_stop {
             tracks.clear();
             last_tick = this->now();
             last_feedback = this->now();
+            ts = this->now();
             RCLCPP_INFO(get_logger(), "Goal accepted(hold_time=%.1f s, target_class='%s')", hold_time, target_class.c_str());
         }
 
         //Control Loop
 
-        std::vector<Candidate> collect_candidates(double max_age) const {
+        std::vector<Candidate> collect_candidates(double ma) const {
             std::vector<Candidate> out;
-            const auto now = this->now();
-            for (const auto & [name,track] : tracks) {
-                if(!target_class.empty() && name != target_class) 
-                continue;
-                if((now - track.stamp).seconds() > max_age)
-                continue;
-                out.push_back({name, track.filtered_s - odometer, target_gap(profiles.at(name), target_fraction)});
+            const auto n = this->now();
+            for (const auto &p : tracks) {
+                const auto &t = p.second;
+                if (!target_class.empty() && t.cls != target_class) continue;
+                if ((n - t.stamp).seconds() > ma) continue;
+                out.push_back({t.cls, t.filtered_s - odometer, target_gap(profiles.at(t.cls), target_fraction)});
             }
             return out;
         }
@@ -268,6 +265,9 @@ namespace igvc_stop {
 
             if(state == State::MONITORING) {
                 const auto cands = collect_candidates(det_timeout);
+                if (!cands.empty()) ts = now;
+                else if ((now - ts).seconds() > 2.0) { 
+                    finish(false, "obstacle lost", last_distance); return; }
                 double worst_margin = std::numeric_limits<double>::infinity();
                 const Candidate * trigger = nullptr;
                 double trigger_dist = 0.0;
@@ -297,7 +297,7 @@ namespace igvc_stop {
                         trigger_speed = v;
                         trigger_odometer = odometer;
                         RCLCPP_INFO(get_logger(), "Brake trigger: %s at %.2f m (trigger %.2f m), speed %.2f m/s",
-            brake_class_.c_str(), trigger->d, trigger_dist, v);
+            brake_class.c_str(), trigger->d, trigger_dist, v);
                     }
                 }
             }
@@ -355,7 +355,7 @@ namespace igvc_stop {
 
         //parameters
         std::string detection_topic, odom_topic, cmd_vel_topic;
-        double control_rate_hz{20.0}, a_comfort{1.0}, a_max{2.5}, t_lat{0.15};
+        double control_rate_hz{20.0}, a_comfort{1.0}, lm{1.2}, a_max{2.5}, t_lat{0.15};
         double target_fraction{0.5}, v_stop{0.03}, sensor_offset{0.0};
         double det_timeout{0.5}, dr_timeout{3.0}, min_score{0.3};
         int filter_window{5};
@@ -367,14 +367,14 @@ namespace igvc_stop {
         double last_x{0.0}, last_y{0.0}, odometer{0.0}, v_meas{0.0}, w_meas{0.0};
 
         //detections
-        std::unordered_map<std::string, Track> tracks;
+        std::unordered_map<int, Track> tracks;
 
         //goal state
         std::shared_ptr<GoalHandle> goal_handle;
         State state{State::MONITORING};
         double hold_time{0.0}, v_cmd{0.0}, trigger_speed{0.0}, trigger_odometer{0.0}, last_distance{0.0};
         std::string target_class, brake_class;
-        rclcpp::Time last_tick{0, 0, RCL_ROS_TIME}, last_feedback{0, 0, RCL_ROS_TIME}, stopped_at{0, 0, RCL_ROS_TIME};
+        rclcpp::Time last_tick{0, 0, RCL_ROS_TIME}, last_feedback{0, 0, RCL_ROS_TIME}, stopped_at{0, 0, RCL_ROS_TIME}, ts{0, 0, RCL_ROS_TIME};
 
         //ROS handles
         rclcpp::Subscription<det>::SharedPtr det_sub;

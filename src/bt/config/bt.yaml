@@ -3,9 +3,12 @@ bt:
     detections_topic: /tracked_obstacles
     lane_follow_enable_topic: /lane_follow/enable   # path_bridge gate 
     lane_change_action: lane_change
+    stop_action: stop
     tick_rate: 20.0
     stale_timeout: 1.0            # sec without a detection list -> decision falls back to none
     lane_change_min_retry: 4.0    # sec, retry lockout after a FAILED lane change goal (a success never blocks the next obstacle)
+    stop_min_retry: 2.0
+    stop_hold_time: 3.0
 
     # detection filtering
     min_score: 0.5
