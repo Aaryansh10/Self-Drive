@@ -73,8 +73,8 @@ struct Decision {
  
 class Decider {
  public:
-  explicit Decider(DecisionConfig cfg) : cfg_(std::move(cfg)) {}
- 
+  explicit Decider(DecisionConfig cfg) : cfg_(std::move(cfg)) {}  //member initializer list, transfers ownership of the data efficiently without making a heavy duplicate copy
+  
   Decision update(const std::vector<Detection>& dets, double now) {
     expire(now);
     Cand best[2];  // [0] = CHANGE, [1] = STOP
@@ -82,7 +82,7 @@ class Decider {
       if (!d.valid || d.score < cfg_.min_score || d.n_pts < cfg_.min_points) continue;
       if (!std::isfinite(d.distance) || d.distance < cfg_.min_distance) continue;
       
-      // Filter out clutter that is physically way outside our lane width (using local base frame Y)
+      // fixed this for the fluctuating lae change filter out that is physically way outside our lane width (using local base frame Y)
       if (std::abs(d.local_y) > cfg_.max_lateral_offset) continue;
 
       const auto it = cfg_.classes.find(d.cls);
@@ -159,13 +159,11 @@ class Decider {
  
   bool handled(const Detection& d, double now) {
     for (auto& h : handled_) {
-      // 1. Check matching real ID if available
       if (d.id >= 0 && h.id >= 0 && h.id == d.id) {
         h.last_seen = now;
         return true;
       }
-      
-      // 2. Fixed World-Space Exclusion (1.8m around physical obstacle location)
+      // 1.8m around physical obstacle location
       double dx = d.x - h.x;
       double dy = d.y - h.y;
       double spatial_dist = std::sqrt(dx * dx + dy * dy);

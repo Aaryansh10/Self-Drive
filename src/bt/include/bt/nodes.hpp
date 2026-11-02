@@ -23,7 +23,7 @@
 
 namespace bt {
 
-// reads the latest decision and writes it on the blackboard  , decision = none  or change or stop.
+// reads the latest decision and writes it on the blackboard 
 class DecideAction : public BT::SyncActionNode {
  public:
   DecideAction(const std::string& name, const BT::NodeConfig& config, std::shared_ptr<SharedState> state)
@@ -70,7 +70,6 @@ class StopRobot : public BT::SyncActionNode {
 };
 
 // Default behaviour: tells path_bridge lane following is enabled while this node runs, disabled when it is halted.
-// (Needs the enable gate in path_bridge; without it the messages are simply ignored.)
 class LaneFollowing : public BT::StatefulActionNode {
  public:
   LaneFollowing(const std::string& name, const BT::NodeConfig& config, rclcpp::Node::SharedPtr node,
@@ -109,13 +108,12 @@ class LaneChange : public BT::RosActionNode<lane_change_interfaces::action::Lane
     return providedBasicPorts({BT::InputPort<int>("obstacle_id", -1, "obstacle that triggered this lane change")});
   }
 
-  // Called once when the node starts. Sends a goal only for an active CHANGE decision, and not while a
-  // recent FAILURE is still in its retry lockout. (A success never blocks the next, different obstacle.)
+  // Called once when the node starts. Sends a goal only for an active CHANGE decision,
   bool setGoal(Goal& goal) override {
     if (state_->now() - last_fail_ < min_retry_) return false;
     const Decision d = state_->current();
     if (d.action != Action::CHANGE) return false;  // the obstacle went away before we could start
-    sent_ = d;                                     // remember exactly which obstacle this goal is for
+    sent_ = d;                                     // remember the obstacle this goal is for
     goal.obstacle_distance = std::isfinite(d.distance) ? d.distance : 0.0;  // the server ignores these fields
     goal.completion_distance = 0.0;
     goal.target_speed = 0.0;
@@ -142,7 +140,7 @@ class LaneChange : public BT::RosActionNode<lane_change_interfaces::action::Lane
     return BT::NodeStatus::FAILURE;
   }
 
-  // halt(): the wrapper cancels the goal for us; nothing was marked handled, so the obstacle can still trigger.
+  // halt(): the wrapper cancels the goal ; nothing was marked handled, so the obstacle can still trigger.
   void onHalt() override { RCLCPP_DEBUG(logger(), "LaneChange halted"); }
 
  private:

@@ -47,7 +47,6 @@ int main(int argc, char** argv) {
   cfg.same_obstacle_tol = node->declare_parameter<double>("same_obstacle_tol", cfg.same_obstacle_tol);
   cfg.max_lateral_offset = node->declare_parameter<double>("max_lateral_offset", 1.2);
 
-  // class table: class_name + classes.<name>.action / classes.<name>.trigger_distance
   const auto names = node->declare_parameter<std::vector<std::string>>("class_name", std::vector<std::string>{});
   for (const auto& n : names) {
     bt::ClassRule r;

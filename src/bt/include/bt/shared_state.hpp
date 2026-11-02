@@ -1,4 +1,4 @@
-// Thread-safe bridge between the detection subscriber and the BT nodes.
+// Thread-safe bridge between the detection subscriber and the BT nodes. - i just hope this works as intended, because the BT nodes are not guaranteed to be called in a single thread, and the detection callback is in a different thread. So we need to protect access to the shared state with a mutex.
 #pragma once
 #include <functional>
 #include <mutex>
@@ -11,7 +11,7 @@ namespace bt {
 
 class SharedState {
  public:
-  // stale_timeout: if no detection list arrived for this long, the decision falls back to NONE
+  //if no detection list arrived for this long the decision falls back to noneee
   SharedState(DecisionConfig cfg, double stale_timeout, std::function<double()> clock)
       : decider_(std::move(cfg)), stale_(stale_timeout), clock_(std::move(clock)) {}
 
