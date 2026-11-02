@@ -1,0 +1,24 @@
+vision:
+  ros__parameters:
+    image_topic: /zed_node/monocamera/image_raw
+    cam_info_topic: /zed_node/monocamera/camera_info
+    imu_topic: /imu
+    onnx_path: /home/aaryansh/dev/Self-Drive/src/vision_cpp/models/hydranet.onnx   # engine is cached next to it (hydranet.fp16.engine)
+    use_fp16: true
+    input_height: 544
+    input_width: 960
+    subsample_step: 1
+    cam_pitch: 0.4
+    cam_height: 1.606
+    max_range: 8.0
+    thin_row_start: 160    # re-derive if cam_pitch / cam_height / max_range / intrinsics change
+    score_thresh: 0.35
+    nms_iou: 0.5
+    max_detections: 50
+    class_names: [barrel, tyre, pothole, sign, pedestrian]
+    cuda_graph: true
+    spin_wait: true
+    lock_memory: true
+    rt_priority: 0
+    profile_timing: true
+    profile_period: 50

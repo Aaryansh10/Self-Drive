@@ -49,7 +49,7 @@ struct Params {
   int sg_polyorder = 2;
   double track_ema_alpha = 0.35;
   double width_ema_alpha = 0.15;
-  double centerline_ema_alpha = 0.2;
+  double centerline_ema_alpha = 0.17;
   double width_update_max_x = 4.0;
   double resample_step = 0.1;
   double position_window_m = 1.0;
