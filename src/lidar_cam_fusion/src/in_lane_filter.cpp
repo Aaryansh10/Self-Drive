@@ -355,9 +355,9 @@ class InLaneFilter : public rclcpp::Node {
         std::string white_topic = declare_parameter<std::string>("white_lane_topic", "pc_whitelane");
         std::string yellow_topic = declare_parameter<std::string>("yellow_lane_topic", "pc_yellowlane");
         ground_frame = declare_parameter<std::string>("ground_frame", "link_base");
-        max_lane_width = declare_parameter<double>("max_lane_width", 5.0);
-        min_lane_width = declare_parameter<double>("min_lane_width", 1.0);
-        lane_width = declare_parameter<double>("lane_width", 3.5);
+        max_lane_width = declare_parameter<double>("max_lane_width", 4.2);
+        min_lane_width = declare_parameter<double>("min_lane_width", 3.2);
+        lane_width = declare_parameter<double>("lane_width", 3.7);
         lane_margin = declare_parameter<double>("lane_margin", 0.0);
         lane_max_age = declare_parameter<double>("lane_max_age", 0.5);
         in_lane_unknown = declare_parameter<bool>("in_lane_unknown", false);
