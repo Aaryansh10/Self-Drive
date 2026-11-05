@@ -6,8 +6,13 @@
   <description>Stop action server node</description>
   <maintainer email="user@todo.todo">user</maintainer>
   <license>Apache-2.0</license>
-
   <buildtool_depend>ament_cmake</buildtool_depend>
+  <buildtool_depend>rosidl_default_generators</buildtool_depend>
+
+  <depend>action_msgs</depend>
+
+  <exec_depend>rosidl_default_runtime</exec_depend>
+  <member_of_group>rosidl_interface_packages</member_of_group>
 
   <!-- Compile and runtime dependencies matching your #includes -->
   <depend>rclcpp</depend>

@@ -13,6 +13,7 @@ find_package(geometry_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)
 find_package(stop_interfaces REQUIRED)
 find_package(vision_interfaces REQUIRED)
+find_package(fusion_interfaces REQUIRED)
 
 # 2. Declare the executable target
 add_executable(stop_action src/stop_action.cpp)
@@ -30,6 +31,7 @@ ament_target_dependencies(stop_action
   geometry_msgs
   nav_msgs
   stop_interfaces
+  vision_interfaces
   fusion_interfaces
 )
 

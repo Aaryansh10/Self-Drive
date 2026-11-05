@@ -1,7 +1,7 @@
 <?xml version="1.0"?>
 <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
-  <name>igvc_stop_interfaces</name>
+  <name>stop_interfaces</name>
   <version>0.1.0</version>
   <description>Action and message definitions for the IGVC stop action server</description>
   <maintainer email="debarko.dutta27@gmail.com">igvc</maintainer>
