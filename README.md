@@ -7,3 +7,4 @@
 * `__NV_PRIME_RENDER_OFFLOAD=1 __GLX_VENDOR_LIBRARY_NAME=nvidia ros2 launch self_drive_course self_drive_course.launch.py`
 * `__NV_PRIME_RENDER_OFFLOAD=1 __GLX_VENDOR_LIBRARY_NAME=nvidia ros2 launch steve_description robot_gazebo.launch.py`
 * `ros2 launch ros2 launch mapping_cpp mapping.launch.py `
+* `ros2 run vision_cpp vision_node --ros-args -p onnx_path:=$HOME/dev/Self-Drive/src/vision_cpp/models/hydranet.onnx`

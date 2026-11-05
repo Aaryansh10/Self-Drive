@@ -22,9 +22,13 @@
                                 <ScriptCondition code="decision == 'change'"/>
                                 <LaneChange obstacle_id="{obstacle_id}"/>
                             </Sequence>
+                        </ForceSuccess>
+                    </KeepRunningUntilFailure>
+                    <KeepRunningUntilFailure>
+                        <ForceSuccess>
                             <Sequence>
                                 <ScriptCondition code="decision == 'intersection'"/>
-                                <Intersection obstacle_id="{obstacle_id}"/>
+                                <Intersection/>
                             </Sequence>
                         </ForceSuccess>
                     </KeepRunningUntilFailure>

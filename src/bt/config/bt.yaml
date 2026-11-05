@@ -18,11 +18,19 @@ bt:
     pseudo_ttl: 2.0               # s, forget a handled id-less obstacle after this long unseen
     same_obstacle_tol: 0.5        # m, id-less matching: distance may grow this much and still be the same obstacle
 
+    intersection_action: intersection
+    intersection_turns: ["left", "straight", "right"]
+    road_width: 7.4               # In m
+    confirm_intersection: 3
+    intersection_hold: 20.0
+    stop_sign_ttl: 20.0
+
     # class table: exact class_name strings from /tracked_obstacles. action = stop | change | none
     class_name: ["pedestrian", "sign", "barrel", "tyre", "pothole"]
     classes:
       pedestrian: {action: stop, trigger_distance: 5.0}
-      sign:   {action: stop, trigger_distance: 5.0}
+      sign:   {action: none, trigger_distance: 8.0, marks_stop_sign: true}
       barrel:     {action: change, trigger_distance: 3.96}
       tyre:        {action: change, trigger_distance: 3.96}
       pothole:    {action: change, trigger_distance: 3.96}
+      stopline: {action: intersection, trigger_distance: 3.96}
