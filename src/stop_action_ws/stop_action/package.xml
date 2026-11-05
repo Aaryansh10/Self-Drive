@@ -21,6 +21,8 @@
   <depend>nav_msgs</depend>
   <depend>stop_interfaces</depend>
   <depend>fusion_interfaces</depend>
+  <build_depend>vision_interfaces</build_depend>
+  <exec_depend>vision_interfaces</exec_depend>
 
   <!-- Runtime dependencies for your launch file -->
   <exec_depend>launch</exec_depend>

@@ -4,7 +4,8 @@ stop_action:
 
     detection_topic: /detections
     odom_topic: /odom
-    cmd_vel_topic: /cmd_vel_stop        
+    cmd_vel_topic: /cmd_vel_stop
+    some_string_param: "default_value"        
 
     
     control_rate_hz: 20.0

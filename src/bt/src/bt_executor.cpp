@@ -30,6 +30,7 @@ int main(int argc, char** argv) {
   const auto det_topic = node->declare_parameter<std::string>("detections_topic", "/tracked_obstacles");
   const auto enable_topic = node->declare_parameter<std::string>("lane_follow_enable_topic", "/lane_follow/enable");
   const auto lane_change_action = node->declare_parameter<std::string>("lane_change_action", "lane_change");
+  const auto stop_action = node->declare_parameter<std::string>("stop_action", "stop");
   const double tick_rate = node->declare_parameter<double>("tick_rate", 20.0);
   const double stale = node->declare_parameter<double>("stale_timeout", 1.0);
   const double min_retry = node->declare_parameter<double>("lane_change_min_retry", 2.0);
