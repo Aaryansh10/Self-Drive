@@ -14,6 +14,7 @@
 #include "rclcpp_action/rclcpp_action.hpp"
 #include "stop_interfaces/action/stop.hpp"
 #include "stop_action/stop_logic.hpp"
+#include "vision_interfaces/msg/detection_array.hpp"
 
 namespace igvc_stop {
 
@@ -41,6 +42,27 @@ public:
             odom_topic, rclcpp::SensorDataQoS(),
             std::bind(&StopActionServer::odom_callback, this, std::placeholders::_1));
         cmd_pub = create_publisher<geometry_msgs::msg::Twist>(cmd_vel_topic, 10);
+        // Single owner of the actuator topic: navigation passes through only before braking.
+        drive_sub = create_subscription<geometry_msgs::msg::Twist>(
+            get_parameter("drive_cmd_topic").as_string(), 10,
+            [this](geometry_msgs::msg::Twist::ConstSharedPtr msg) {
+                if (!fault_latched && (!goal_handle || (state == State::MONITORING &&
+                    have_odom && now().seconds() - odom_received <= odom_timeout))) cmd_pub->publish(*msg);
+            });
+        lane_sub = create_subscription<vision_interfaces::msg::DetectionArray>(
+            get_parameter("lane_detections_topic").as_string(), rclcpp::SensorDataQoS(),
+            [this](vision_interfaces::msg::DetectionArray::ConstSharedPtr msg) {
+                const double t = now().seconds();
+                bool occupied = false;
+                for (const auto & d : msg->detections) {
+                    // Invalid pedestrian depth is not evidence that the lane is clear.
+                    if (d.class_name == "pedestrian" && (!d.depth_valid || d.is_in_lane)) occupied = true;
+                }
+                if (occupied || !have_lane || t - lane_received > detection_timeout) clear_since = t;
+                pedestrian_present = occupied;
+                lane_received = t;
+                have_lane = true;
+            });
 
         action_server = rclcpp_action::create_server<Stop>(
             this, "stop",
@@ -61,7 +83,12 @@ private:
     // ------------------------------------------------------------------ parameters
     void declare_parameters() {
         declare_parameter<std::string>("odom_topic", "/odom");
-        declare_parameter<std::string>("cmd_vel_topic", "/cmd_vel_stop");
+        declare_parameter<std::string>("cmd_vel_topic", "/cmd_vel");
+        declare_parameter<std::string>("drive_cmd_topic", "/cmd_vel_drive");
+        declare_parameter<std::string>("lane_detections_topic", "/detections_lane");
+        declare_parameter<double>("detection_timeout", 1.0);
+        declare_parameter<double>("odom_timeout", 1.0);
+        declare_parameter<double>("pedestrian_clear_time", 0.5);
         declare_parameter<double>("control_rate_hz", 20.0);
         declare_parameter<double>("a_comfort", 1.0);
         declare_parameter<double>("a_max", 2.5);
@@ -87,13 +114,20 @@ private:
         v_stop = get_parameter("stop_speed_threshold").as_double();
         sensor_offset = get_parameter("sensor_to_front_offset").as_double();
         goal_timeout = get_parameter("goal_timeout").as_double();
+        detection_timeout = get_parameter("detection_timeout").as_double();
+        odom_timeout = get_parameter("odom_timeout").as_double();
+        clear_time = get_parameter("pedestrian_clear_time").as_double();
+        if (odom_timeout <= 0.0 || detection_timeout <= 0.0 || clear_time < 0.0 || v_stop <= 0.0) {
+            throw std::runtime_error("Invalid detection timeout, clear time, or stop threshold");
+        }
 
         if (control_rate_hz <= 0.0 || a_comfort <= 0.0 || a_max < a_comfort || t_lat < 0.0 || goal_timeout <= 0.0) {
             throw std::runtime_error("Invalid parameters: need control_rate_hz>0, a_comfort>0, a_max>=a_comfort, latency>=0, goal_timeout>0");
         }
 
         default_profile = read_profile("default_profile.", "default_profile");
-        for (const auto & name : get_parameter("profile_names").as_string_array()) {
+        const auto profile_names = get_parameter("profile_names").as_string_array();
+        for (const auto & name : profile_names) {
             if (name.empty()) continue;
             const std::string prefix = "profiles." + name + ".";
             declare_parameter<double>(prefix + "min_distance", default_profile.min_distance);
@@ -124,6 +158,7 @@ private:
         last_x = x;
         last_y = y;
         have_odom = true;
+        odom_received = now().seconds();
         v_meas = msg->twist.twist.linear.x;
         w_meas = msg->twist.twist.angular.z;
     }
@@ -134,7 +169,11 @@ private:
             RCLCPP_WARN(get_logger(), "Rejecting goal: another goal is active");
             return rclcpp_action::GoalResponse::REJECT;
         }
-        if (!(goal->hold_time >= 0.0F)) {  
+        if (goal->target_class != "pedestrian" && goal->target_class != "stop_sign") {
+            RCLCPP_WARN(get_logger(), "Rejecting unsupported stop class: %s", goal->target_class.c_str());
+            return rclcpp_action::GoalResponse::REJECT;
+        }
+        if (!std::isfinite(goal->hold_time) || !(goal->hold_time >= 0.0F)) {
             RCLCPP_WARN(get_logger(), "Rejecting goal: invalid hold_time");
             return rclcpp_action::GoalResponse::REJECT;
         }
@@ -148,7 +187,8 @@ private:
     void handle_accepted(const std::shared_ptr<GoalHandle> gh) {
         goal_handle = gh;
         const auto goal = gh->get_goal();
-        hold_time = goal->hold_time;
+        hold_time = goal->target_class == "pedestrian" ? 0.0 : 2.0;
+        fault_latched = false;
         target_class = goal->target_class;
 
         const auto it = profiles.find(target_class);
@@ -224,18 +264,28 @@ private:
 
     // ------------------------------------------------------------------ control loop
     void control_loop() {
-        if (!goal_handle) return;
+        if (!goal_handle) {
+            if (fault_latched) publish_cmd(0.0);
+            return;
+        }
         const auto now_t = this->now();
 
         if (goal_handle->is_canceling()) {
+            publish_cmd(0.0);
             finish(false, "cancelled");
             return;
         }
-        if ((now_t - goal_start).seconds() > goal_timeout) {
+        if (state != State::STOPPED && (now_t - goal_start).seconds() > goal_timeout) {
+            fault_latched = true;
+            publish_cmd(0.0);
             finish(false, "timeout: brake point never reached / never stopped");
             return;
         }
-        if (!have_odom) return;
+        if (!have_odom || now_t.seconds() - odom_received > odom_timeout) {
+            publish_cmd(0.0);
+            if (state == State::STOPPED) stopped_at = now_t;
+            return;
+        }
 
         const double dt = std::clamp((now_t - last_tick).seconds(), 1e-3, 0.5);
         last_tick = now_t;
@@ -283,7 +333,12 @@ private:
         } else if (state == State::STOPPED) {
             v_cmd = 0.0;
             publish_cmd(0.0);
-            if ((now_t - stopped_at).seconds() >= hold_time) {
+            const double t = now_t.seconds();
+            const bool lane_clear = have_lane && t - lane_received <= detection_timeout &&
+                !pedestrian_present && t - clear_since >= clear_time;
+            // Also protect a sign stop if a pedestrian enters during its two-second dwell.
+            if (v >= v_stop) stopped_at = now_t;
+            if (v < v_stop && lane_clear && (now_t - stopped_at).seconds() >= hold_time) {
                 finish(true, "stopped");
                 return;
             }
@@ -302,6 +357,10 @@ private:
     // ------------------------------------------------------------------ members
     // parameters
     std::string odom_topic, cmd_vel_topic;
+    bool have_lane{false}, pedestrian_present{true}, fault_latched{false};
+    double lane_received{0.0}, clear_since{0.0}, detection_timeout{1.0}, clear_time{0.5};
+    rclcpp::Subscription<vision_interfaces::msg::DetectionArray>::SharedPtr lane_sub;
+    rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr drive_sub;
     double control_rate_hz{20.0}, a_comfort{1.0}, a_max{2.5}, t_lat{0.15};
     double target_fraction{0.5}, v_stop{0.03}, sensor_offset{0.0}, goal_timeout{30.0};
     std::unordered_map<std::string, Profile> profiles;
@@ -309,6 +368,7 @@ private:
 
     // odometry
     bool have_odom{false};
+    double odom_received{0.0}, odom_timeout{1.0};
     double last_x{0.0}, last_y{0.0}, odometer{0.0}, v_meas{0.0}, w_meas{0.0};
 
     // current goal

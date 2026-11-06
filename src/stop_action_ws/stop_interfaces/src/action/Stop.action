@@ -1,7 +1,7 @@
 # ---- Goal ----
-float32 hold_time
-string target_class
-float32 obstacle_distance
+float32 hold_time          # legacy request; server uses lane clearance for pedestrians, 2 s for stop signs at their corresponding lines
+string target_class        # pedestrian | stop_sign
+float32 obstacle_distance # for stop_sign: forward distance to its corresponding stop line
 ---
 # ---- Result ----
 bool success

@@ -12,6 +12,7 @@ find_package(rclcpp_action REQUIRED)
 find_package(behaviortree_cpp REQUIRED)
 find_package(behaviortree_ros2 REQUIRED)
 find_package(fusion_interfaces REQUIRED)
+find_package(vision_interfaces REQUIRED)
 find_package(lane_change_interfaces REQUIRED)
 find_package(stop_interfaces REQUIRED)
 find_package(std_msgs REQUIRED)
@@ -19,7 +20,7 @@ find_package(std_msgs REQUIRED)
 add_executable(bt_executor src/bt_executor.cpp)
 target_include_directories(bt_executor PRIVATE 
                             ${CMAKE_CURRENT_SOURCE_DIR}/include )
-ament_target_dependencies(bt_executor rclcpp rclcpp_action std_msgs fusion_interfaces lane_change_interfaces stop_interfaces behaviortree_ros2 behaviortree_cpp)
+ament_target_dependencies(bt_executor rclcpp rclcpp_action std_msgs fusion_interfaces vision_interfaces lane_change_interfaces stop_interfaces behaviortree_ros2 behaviortree_cpp)
 target_link_libraries(bt_executor 
     behaviortree_ros2::behaviortree_ros2)
  

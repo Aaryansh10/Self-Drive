@@ -57,16 +57,14 @@ class StopRobot : public BT::RosActionNode<stop_interfaces::action::Stop> {
   using StopAction = stop_interfaces::action::Stop;
 
   StopRobot(const std::string& name, const BT::NodeConfig& conf, const BT::RosNodeParams& params,
-            std::shared_ptr<SharedState> state, double min_retry_s, double default_hold_time_s = 3.0)
+            std::shared_ptr<SharedState> state, double min_retry_s)
       : RosActionNode<StopAction>(name, conf, params),
         state_(std::move(state)),
-        min_retry_(min_retry_s),
-        default_hold_time_(default_hold_time_s) {}
+        min_retry_(min_retry_s) {}
 
   static BT::PortsList providedPorts() {
     return providedBasicPorts({
-        BT::InputPort<int>("obstacle_id", -1, "obstacle that triggered this stop"),
-        BT::InputPort<double>("hold_time", -1.0, "override hold time at standstill (s); < 0 uses default")
+        BT::InputPort<int>("obstacle_id", -1, "obstacle that triggered this stop")
     });
   }
 
@@ -78,12 +76,9 @@ class StopRobot : public BT::RosActionNode<stop_interfaces::action::Stop> {
     if (d.action != Action::STOP) return false;  // the obstacle went away before we could start
     sent_ = d;                                   // remember exactly which obstacle this goal is for
 
-    double hold = default_hold_time_;
-    getInput("hold_time", hold);
-    if (hold < 0.0) hold = default_hold_time_;
-
-    goal.hold_time = static_cast<float>(hold);
-    goal.target_class = d.cls;  // filter to the class that triggered the decision (empty = any profiled class)
+    goal.hold_time = d.cls == "pedestrian" ? 0.0F : 2.0F;
+    goal.target_class = d.cls;
+    goal.obstacle_distance = std::isfinite(d.distance) ? static_cast<float>(d.distance) : 0.0F;
     return true;
   }
 
@@ -115,7 +110,6 @@ class StopRobot : public BT::RosActionNode<stop_interfaces::action::Stop> {
  private:
   std::shared_ptr<SharedState> state_;
   double min_retry_;
-  double default_hold_time_;
   double last_fail_ = -1e9;
   Decision sent_;
 };

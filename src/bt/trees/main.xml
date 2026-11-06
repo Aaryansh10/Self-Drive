@@ -11,7 +11,8 @@
                     <ScriptCondition code="decision == 'stop'"/>
                      <Parallel success_count="1" failure_count="1">
                       <LaneFollowing/>
-                      <StopRobot/>
+                      <!-- Retry failures while retaining stop priority; never fall through to a lane change. -->
+                      <ForceSuccess><StopRobot/></ForceSuccess>
                      </Parallel>
                 </Sequence>
  

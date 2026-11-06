@@ -38,8 +38,8 @@ struct Detection {
   bool valid = false;
   double distance = 0.0;
   long id = -1;  
-  double x = 0.0;        // Global Odom X
-  double y = 0.0;        // Global Odom Y
+  double x = std::numeric_limits<double>::quiet_NaN(); // Global Odom X
+  double y = std::numeric_limits<double>::quiet_NaN(); // Global Odom Y
   double local_y = 0.0;  // Local Base Y for lateral filter
 };
  
@@ -83,13 +83,13 @@ class Decider {
       if (!std::isfinite(d.distance) || d.distance < cfg_.min_distance) continue;
       
       // Filter out clutter that is physically way outside our lane width (using local base frame Y)
-      if (std::abs(d.local_y) > cfg_.max_lateral_offset) continue;
+      if (d.cls != "stop_sign" && std::abs(d.local_y) > cfg_.max_lateral_offset) continue;
 
       const auto it = cfg_.classes.find(d.cls);
       if (it == cfg_.classes.end() || it->second.action == Action::NONE) continue;
       const ClassRule& r = it->second;
       if (d.distance > r.trigger_distance) continue;                // not close enough yet
-      if (r.action == Action::CHANGE && handled(d, now)) continue;  // already dealt with
+      if ((r.action == Action::CHANGE || d.cls == "stop_sign") && handled(d, now)) continue;  // already dealt with
       Cand& c = best[r.action == Action::STOP ? 1 : 0];
       if (!c.valid || d.distance < c.det.distance) {
         c.valid = true;
@@ -119,7 +119,8 @@ class Decider {
  
   // Call when a lane change for exactly this CHANGE decision (the one the goal was sent for) succeeded.
   void mark_handled(const Decision& d, double now) {
-    if (d.action != Action::CHANGE) return;
+    if (d.action != Action::CHANGE && !(d.action == Action::STOP &&
+        (d.cls == "stop_sign"))) return;
     Handled h;
     h.id = d.obstacle_id;
     h.cls = d.cls;
@@ -128,8 +129,9 @@ class Decider {
     h.y = d.y;         
     h.last_seen = now;
     handled_.push_back(h);
-    hold_until_[0] = 0.0;
-    hits_[0] = 0;
+    const int index = d.action == Action::STOP ? 1 : 0;
+    hold_until_[index] = 0.0;
+    hits_[index] = 0;
   }
  
  private:
@@ -159,6 +161,9 @@ class Decider {
  
   bool handled(const Detection& d, double now) {
     for (auto& h : handled_) {
+      if (h.cls != d.cls) continue;
+      // Distinct tracked IDs are distinct obstacles.
+      if (d.id >= 0 && h.id >= 0 && d.id != h.id) continue;
       // 1. Check matching real ID if available
       if (d.id >= 0 && h.id >= 0 && h.id == d.id) {
         h.last_seen = now;
@@ -170,7 +175,8 @@ class Decider {
       double dy = d.y - h.y;
       double spatial_dist = std::sqrt(dx * dx + dy * dy);
       
-      if (h.cls == d.cls && spatial_dist <= 1.8) {
+      if ((std::isfinite(spatial_dist) && spatial_dist <= 1.8) ||
+          (!std::isfinite(spatial_dist) && d.distance <= h.distance + cfg_.same_obstacle_tol)) {
         h.last_seen = now;
         return true;
       }

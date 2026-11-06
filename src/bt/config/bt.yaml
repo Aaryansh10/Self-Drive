@@ -1,6 +1,7 @@
 bt:
   ros__parameters:
     detections_topic: /tracked_obstacles
+    lane_detections_topic: /detections_lane
     lane_follow_enable_topic: /lane_follow/enable   # path_bridge gate 
     lane_change_action: lane_change
     stop_action: stop
@@ -8,12 +9,11 @@ bt:
     stale_timeout: 1.0            # sec without a detection list -> decision falls back to none
     lane_change_min_retry: 4.0    # sec, retry lockout after a FAILED lane change goal (a success never blocks the next obstacle)
     stop_min_retry: 2.0
-    stop_hold_time: 3.0
 
     # detection filtering
     min_score: 0.5
     min_points: 1
-    min_distance: 2.0             # m, closer readings are ignored
+    min_distance: 0.05             # m, closer readings are ignored
     confirm_change: 4             # consecutive detection lists before CHANGE is reported
     confirm_stop: 2               # consecutive detection lists before STOP is reported
     hold_time: 0.5                # s, an action survives brief detection dropouts
@@ -22,10 +22,10 @@ bt:
     same_obstacle_tol: 0.5        # m, id-less matching: distance may grow this much and still be the same obstacle
 
     # class table: exact class_name strings from /tracked_obstacles. action = stop | change | none
-    class_name: ["pedestrian", "sign", "barrel", "tyre", "pothole"]
+    class_name: ["pedestrian", "stop_sign", "barrel", "tyre", "pothole"]
     classes:
       pedestrian: {action: stop, trigger_distance: 5.0}
-      sign:   {action: stop, trigger_distance: 5.0}
+      stop_sign: {action: stop, trigger_distance: 5.0}
       barrel:     {action: change, trigger_distance: 3.96}
       tyre:        {action: change, trigger_distance: 3.96}
       pothole:    {action: change, trigger_distance: 3.96}

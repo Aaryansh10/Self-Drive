@@ -20,9 +20,25 @@ class SharedState {
   void on_detections(const std::vector<Detection>& dets) {
     const double t = clock_();
     std::lock_guard<std::mutex> l(m_);
-    decision_ = decider_.update(dets, t);
+    auto eligible = dets;
+    // Obstacle memory may retain a pedestrian after live perception confirms clearance.
+    if (have_lane_ && t - lane_msg_ <= stale_ && !pedestrian_in_lane_ &&
+        t - lane_clear_since_ >= 0.5) {
+      eligible.erase(std::remove_if(eligible.begin(), eligible.end(),
+          [](const Detection& d) { return d.cls == "pedestrian"; }), eligible.end());
+    }
+    decision_ = decider_.update(eligible, t);
     t_msg_ = t;
     have_ = true;
+  }
+
+  void on_lane(bool pedestrian_in_lane) {
+    const double t = clock_();
+    std::lock_guard<std::mutex> l(m_);
+    if (!have_lane_ || pedestrian_in_lane || t - lane_msg_ > stale_) lane_clear_since_ = t;
+    pedestrian_in_lane_ = pedestrian_in_lane;
+    lane_msg_ = t;
+    have_lane_ = true;
   }
 
   Decision current() {
@@ -37,7 +53,8 @@ class SharedState {
     const double t = clock_();
     std::lock_guard<std::mutex> l(m_);
     decider_.mark_handled(d, t);
-    if (decision_.action == Action::CHANGE) decision_ = Decision{};
+    if (decision_.action == d.action && decision_.cls == d.cls &&
+        decision_.obstacle_id == d.obstacle_id && d.cls != "pedestrian") decision_ = Decision{};
   }
 
  private:
@@ -47,6 +64,8 @@ class SharedState {
   double stale_;
   double t_msg_ = 0.0;
   bool have_ = false;
+  bool have_lane_ = false, pedestrian_in_lane_ = true;
+  double lane_msg_ = 0.0, lane_clear_since_ = 0.0;
   std::function<double()> clock_;
 };
 

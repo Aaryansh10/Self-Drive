@@ -4,7 +4,11 @@ stop_action_server:
 
     # --- topics ---
     odom_topic: /odom
-    cmd_vel_topic: /cmd_vel_stop        # into twist_mux with priority over Nav2, NOT straight onto /cmd_vel
+    cmd_vel_topic: /cmd_vel             # sole actuator publisher; navigation enters via drive_cmd_topic
+    drive_cmd_topic: /cmd_vel_drive
+    lane_detections_topic: /detections_lane
+    detection_timeout: 1.0             # stale lane data never releases a stopped robot
+    pedestrian_clear_time: 0.5         # continuous clear observations before release
 
     # --- braking model ---
     control_rate_hz: 20.0
@@ -14,28 +18,20 @@ stop_action_server:
     target_fraction: 0.5                # where to aim in [min_distance, max_distance]: 0 = min, 1 = max
     stop_speed_threshold: 0.03          # m/s, below this the bot counts as stopped
     sensor_to_front_offset: 0.0         # m, sensor -> front bumper (subtracted from goal.obstacle_distance)
-    goal_timeout: 30.0                  # s, abort if the stop is not finished by then
+    goal_timeout: 30.0                  # s, timeout for approach/braking only; STOPPED may wait indefinitely
 
     default_profile:
       min_distance: 0.5
       max_distance: 1.5
       max_speed: 2.2
 
-    profile_names: [barrel, stop_line, mannequin, pedestrians, stop_sign]
+    profile_names: [pedestrian, stop_sign]
     profiles:
-      barrel:
-        min_distance: 0.3
-        max_distance: 0.9
-        max_speed: 2.2
-      stop_line:
-        min_distance: 0.05
-        max_distance: 0.3
-        max_speed: 2.2
-      # ASSUMPTION: BT stop classes mapped onto your windows. Edit to what you actually want.
-      pedestrians:
+      pedestrian:
         min_distance: 1.5
         max_distance: 2.1
         max_speed: 2.2
+      # Distances are measured to the corresponding stop line, not the sign.
       stop_sign:
         min_distance: 0.05
         max_distance: 0.3

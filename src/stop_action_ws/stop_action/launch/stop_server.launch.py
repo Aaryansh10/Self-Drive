@@ -16,7 +16,7 @@ def generate_launch_description():
         Node(
             package='stop_action',
             executable='stop_action',
-            name='stop_action',
+            name='stop_action_server',
             output='screen',
             parameters=[LaunchConfiguration('params_file'),
                         {'use_sim_time': LaunchConfiguration('use_sim_time')}],

@@ -142,7 +142,7 @@ class ObstacleMemory : public rclcpp::Node {
     }
 
     for (const auto &detection : msg->detections) {
-      if (detection.is_stop_sign) continue;               
+      if (detection.class_name == "sign" && !detection.is_stop_sign) continue;
       if(!detection.depth_valid) { 
         any_invalid = true;
         continue;
@@ -173,7 +173,7 @@ class ObstacleMemory : public rclcpp::Node {
         track.hits++;
         track.misses = 0;
         track.matched = true;
-        track.consecutive_out_of_lane = detection.is_in_lane ? 0 : track.consecutive_out_of_lane + 1;
+        track.consecutive_out_of_lane = (detection.is_in_lane || detection.is_stop_sign) ? 0 : track.consecutive_out_of_lane + 1;
 
         if (track.confirmed == false && track.hits >= confirm_hits && track.age <= confirm_window) {
           track.confirmed = true;
@@ -181,10 +181,10 @@ class ObstacleMemory : public rclcpp::Node {
         }
       }
       // Create a new track for an unmatched detection inside the lane
-      else if(detection.is_in_lane) {
+      else if(detection.is_in_lane || detection.is_stop_sign) {
         Track track;
         track.class_id = detection.class_id;
-        track.class_name = detection.class_name;
+        track.class_name = detection.is_stop_sign ? "stop_sign" : detection.class_name;
         track.position_odom = measurement;
         track.matched = true;
         tracks.push_back(track);

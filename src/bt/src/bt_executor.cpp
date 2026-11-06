@@ -9,6 +9,7 @@
 #include "behaviortree_ros2/ros_node_params.hpp"
 #include "fusion_interfaces/msg/tracked_obstacle_array.hpp"
 #include "bt/nodes.hpp"
+#include "vision_interfaces/msg/detection_array.hpp"
 #include "bt/shared_state.hpp"
 #include "rclcpp/rclcpp.hpp"
 
@@ -35,7 +36,6 @@ int main(int argc, char** argv) {
   const double stale = node->declare_parameter<double>("stale_timeout", 1.0);
   const double min_retry = node->declare_parameter<double>("lane_change_min_retry", 2.0);
   const double stop_min_retry = node->declare_parameter<double>("stop_min_retry", 2.0);
-  const double stop_hold_time = node->declare_parameter<double>("stop_hold_time", 3.0);
   
   bt::DecisionConfig cfg;
   cfg.min_score = node->declare_parameter<double>("min_score", cfg.min_score);
@@ -94,7 +94,9 @@ int main(int argc, char** argv) {
       d.score = 1.0; 
       d.n_pts = static_cast<int>(it.hits);
       d.valid = true; 
-      d.distance = it.range;
+      // A line spans the lane: lateral position must not inflate its stopping distance.
+      d.distance = (it.class_name == "stop_sign")
+          ? it.position_base.x : it.range;
       d.id = static_cast<int>(it.id);
       
       // Use position_odom so spatial memory stays fixed in world frame!
@@ -109,10 +111,20 @@ int main(int argc, char** argv) {
     state->on_detections(dets);
   });
 
+  auto lane_sub = node->create_subscription<vision_interfaces::msg::DetectionArray>(
+      node->declare_parameter<std::string>("lane_detections_topic", "/detections_lane"),
+      rclcpp::SensorDataQoS(), [state](vision_interfaces::msg::DetectionArray::ConstSharedPtr msg) {
+        bool occupied = false;
+        for (const auto& d : msg->detections) {
+          if (d.class_name == "pedestrian" && (!d.depth_valid || d.is_in_lane)) occupied = true;
+        }
+        state->on_lane(occupied);
+      });
+
   BT::BehaviorTreeFactory factory;
   factory.registerNodeType<bt::DecideAction>("DecideAction", state);
   factory.registerNodeType<bt::StopRobot>("StopRobot", BT::RosNodeParams(node, stop_action), state,
-                                          stop_min_retry, stop_hold_time);
+                                          stop_min_retry);
   factory.registerNodeType<bt::LaneFollowing>("LaneFollowing", node, enable_topic);
   factory.registerNodeType<bt::LaneChange>("LaneChange", BT::RosNodeParams(node, lane_change_action), state,
                                                 min_retry);
