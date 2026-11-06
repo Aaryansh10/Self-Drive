@@ -1,0 +1,13 @@
+slot_detector:
+  ros__parameters:
+    cloud_topic: /pc_whitelane
+    world_frame: odom
+    min_range: 0.8            # m, in link_base
+    max_range: 10.0           # m, IPM noise grows with range
+    detect_rate: 3.0
+    publish_min_conf: 0.15
+    # --- slot geometry priors: MEASURE these from the rules / sim map and tighten ---
+    width_range: [1.8, 6.0]   # slot width (back-line length) [m]
+    depth_min: 1.5            # shortest visible side [m]
+    side_len_max: 9.0
+    partial_reject_ref_inside: true   # set false for PULL-OUT (robot starts inside the slot)
