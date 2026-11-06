@@ -70,6 +70,7 @@ class Fusion : public rclcpp::Node {
     rclcpp::Subscription<cl>::SharedPtr stop_line_subscription;
     bool stop_line_valid = false;
     float stop_line_dist = 0.0f;
+    float sy = 0.0f, sz = 0.0f;
     size_t stop_line_n = 0;
     rclcpp::Time stop_line_stamp{0, 0 , RCL_ROS_TIME};
         
@@ -136,6 +137,13 @@ std::string camera_frame;
         size_t index = static_cast<size_t>(depths.size() * stop_line_percentile);
         std::nth_element(depths.begin(), depths.begin()+index, depths.end());
         stop_line_dist = depths[index];
+        auto md = [](std::vector<float> &v) {
+        auto m = v.begin() + v.size() / 2;
+        std::nth_element(v.begin(), m, v.end());
+        return *m; 
+    };
+        sy = md(ys);
+        sz = md(zs);
     }
     }
 
@@ -201,13 +209,15 @@ std::string camera_frame;
         
         auto result = b;
 
-        if(b.is_stop_sign) {   
+        if(b.is_stop_sign || b.class_name == stop_sign_class) {   
             result.n_pts = stop_line_n;
             result.depth_valid = false;  
             double age = std::fabs((rclcpp::Time(detections->header.stamp) - stop_line_stamp).seconds());
           if (stop_line_valid && age <= stop_line_max_age) {
                 result.distance = stop_line_dist;
-                set_position(result, 0.5 * (b.x1 + b.x2), 0.5 * (b.y1 + b.y2), stop_line_dist);   
+                result.position.x = stop_line_dist;
+                result.position.y = sy;
+                result.position.z = sz;
                 result.depth_valid = true;
             }
             output.detections.push_back(result);  
@@ -285,6 +295,18 @@ std::string camera_frame;
             result.distance = depths[index];
             set_position(result, 0.5 * (b.x1 + b.x2), 0.5 * (b.y1 + b.y2), result.distance); 
         }
+        else if (have_ground) {
+            // no usable LiDAR points: ground-plane distance from the bottom-center of the box
+            float depth = 0.0f;
+            double u = 0.5 * (b.x1 + b.x2);
+            double v = b.y2;
+            if (ipm_depth(u, v, ipm_origin, ipm_R, depth)) {
+                result.distance = depth;
+                set_position(result, u, v, depth);
+                result.depth_valid = true;
+            }
+        }
+
         output.detections.push_back(result);
     }
 
