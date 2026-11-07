@@ -123,7 +123,6 @@ class ObstacleMemory : public rclcpp::Node {
      image_height = msg->height;
      has_camera_info = true;
      camera_frame = msg->header.frame_id;
-     RCLCPP_INFO(this->get_logger(), "Received camera info");
    }
 
    void detection_callback(const det::SharedPtr msg) {

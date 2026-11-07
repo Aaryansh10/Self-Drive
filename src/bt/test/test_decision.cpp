@@ -19,6 +19,7 @@ static Decision last_dec;  // last decision returned by feed()
 
 static DecisionConfig make_cfg() {
   DecisionConfig c;
+  c.confirm_stop = 2;
   c.classes["pedestrians"] = {Action::STOP, 4.0};
   c.classes["stop_sign"] = {Action::STOP, 3.0};
   c.classes["barrels"] = {Action::CHANGE, 5.0};
@@ -30,6 +31,12 @@ static DecisionConfig make_cfg() {
 static Detection det(const char* cls, double dist, long id = -1, double score = 0.9) {
   Detection d;
   d.cls = cls; d.distance = dist; d.id = id; d.score = score; d.n_pts = 10; d.valid = true;
+  return d;
+}
+
+static Detection det_at(const char* cls, double dist, long id, double world_x) {
+  auto d = det(cls, dist, id);
+  d.x = world_x;
   return d;
 }
 
@@ -86,14 +93,14 @@ int main() {
     Decider dc(make_cfg()); double t = 0;
     feed(dc, {det("barrels", 3.0)}, t, 3);
     dc.mark_handled(last_dec, t);
-    CHECK(feed(dc, {det("barrels", 2.5), det("barrels", 4.8)}, t, 3).action == Action::CHANGE);
+    CHECK(feed(dc, {det("barrels", 2.5), det_at("barrels", 4.8, -1, 10.0)}, t, 3).action == Action::CHANGE);
   }
   { // 9. real ids: same id skipped, new id triggers
     Decider dc(make_cfg()); double t = 0;
     CHECK(feed(dc, {det("barrels", 4.0, 7)}, t, 3).action == Action::CHANGE);
     dc.mark_handled(last_dec, t);
     CHECK(feed(dc, {det("barrels", 3.0, 7)}, t, 3).action == Action::NONE);
-    Decision d = feed(dc, {det("barrels", 3.0, 7), det("barrels", 4.5, 8)}, t, 3);
+    Decision d = feed(dc, {det("barrels", 3.0, 7), det_at("barrels", 4.5, 8, 10.0)}, t, 3);
     CHECK(d.action == Action::CHANGE);
     CHECK(d.obstacle_id == 8);
   }
@@ -113,9 +120,9 @@ int main() {
     Decider dc(make_cfg()); double t = 0;
     Decision sent = feed(dc, {det("barrels", 4.0, 7)}, t, 3);   // goal sent for id 7
     CHECK(sent.obstacle_id == 7);
-    feed(dc, {det("barrels", 4.0, 7), det("barrels", 2.0, 8)}, t, 1);  // id 8 is nearer by the time the result arrives
+    feed(dc, {det("barrels", 4.0, 7), det_at("barrels", 2.0, 8, 10.0)}, t, 1);  // id 8 is nearer by the time the result arrives
     dc.mark_handled(sent, t);
-    Decision d = feed(dc, {det("barrels", 4.0, 7), det("barrels", 2.0, 8)}, t, 3);
+    Decision d = feed(dc, {det("barrels", 4.0, 7), det_at("barrels", 2.0, 8, 10.0)}, t, 3);
     CHECK(d.action == Action::CHANGE);
     CHECK(d.obstacle_id == 8);  // 7 is handled, 8 still needs its own lane change
     dc.mark_handled(Decision{}, t);  // a non-CHANGE decision is ignored

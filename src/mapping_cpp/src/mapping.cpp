@@ -38,7 +38,7 @@ class MappingNode : public rclcpp::Node {
             // A synced cloud is held until TF for its stamp exists. If TF has not arrived
             // after tf_max_wait_ms, the cloud is either dropped or (optionally) placed using
             // the latest available pose.
-            tf_max_wait_ms_ = declare_parameter<int>("tf_max_wait_ms", 300);
+            tf_max_wait_ms_ = declare_parameter<int>("tf_max_wait_ms", 700);
             tf_poll_ms_ = declare_parameter<int>("tf_poll_ms", 10);
             max_pending_ = size_t(std::max<int>(1, declare_parameter<int>("max_pending", 20)));
             fallback_to_latest_ = declare_parameter<bool>("fallback_to_latest", false);

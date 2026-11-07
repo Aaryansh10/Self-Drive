@@ -21,11 +21,34 @@ bt:
     pseudo_ttl: 2.0               # s, forget a handled id-less obstacle after this long unseen
     same_obstacle_tol: 0.5        # m, id-less matching: distance may grow this much and still be the same obstacle
 
-    # class table: exact class_name strings from /tracked_obstacles. action = stop | change | none
-    class_name: ["pedestrian", "stop_sign", "barrel", "tyre", "pothole"]
+    # Explicit is_stop_sign=true + sign_real_prob >= threshold is required.
+    # The current generic-sign detector does not supply authenticity; connect its
+    # classified DetectionArray through fusion. Both real and fake signs use
+    # Detection2D.distance from this depth-enriched topic (already stop-line depth).
+    sign_detections_topic: /detections_depth
+    stop_sign_class: sign
+    sign_real_threshold: 0.5
+    stop_line_topic: /pc_stopline  # fallback only when no recent sign detection exists
+    stop_line_min_points: 5
+    stop_line_half_width: 1.2
+    intersection_input_max_age: 0.5
+    intersection_tf_tolerance: 0.1 # max timestamp skew for a fallback world-position anchor; 0 disables
+    intersection_min_retry: 2.0
+    intersection_server_wait_timeout: 5.0 # seconds for initial DDS action-server discovery
+    intersection_action: intersection
+    intersection_turns: ["straight"]
+    road_width: 7.4               # In m
+    confirm_intersection: 3
+    intersection_hold: 20.0
+    stop_sign_ttl: 20.0
+
+    # Obstacles come from /tracked_obstacles; sign/stopline are synthesized from
+    # the independent intersection inputs above. action = stop | change | intersection | none
+    class_name: ["pedestrian", "sign", "barrel", "tyre", "pothole", "stopline"]
     classes:
       pedestrian: {action: stop, trigger_distance: 5.0}
-      stop_sign: {action: stop, trigger_distance: 5.0}
+      sign:   {action: stop, trigger_distance: 5.0, mark_stop_sign: true}
       barrel:     {action: change, trigger_distance: 3.96}
       tyre:        {action: change, trigger_distance: 3.96}
       pothole:    {action: change, trigger_distance: 3.96}
+      stopline: {action: intersection, trigger_distance: 3.96}
