@@ -1,5 +1,5 @@
 // bt executor: subscribes to the detections, builds the tree from XML, ticks it.
-// It does NOT follow paths and never calls /follow_path: lane following stays in vision -> mux -> path_bridge -> Nav2.
+// path_bridge arbitrates lane/intersection paths and owns the Nav2 FollowPath client.
 #include <chrono>
 #include <memory>
 #include <string>
@@ -10,6 +10,7 @@
 #include "fusion_interfaces/msg/tracked_obstacle_array.hpp"
 #include "bt/nodes.hpp"
 #include "bt/shared_state.hpp"
+#include "bt/intersection_input.hpp"
 #include "rclcpp/rclcpp.hpp"
 
 using bt::Action;
@@ -41,6 +42,12 @@ int main(int argc, char **argv)
 	const double stale = node->declare_parameter<double>("stale_timeout", 1.0);
 	const double min_retry = node->declare_parameter<double>("lane_change_min_retry", 2.0);
 	const auto intersection_action = node->declare_parameter<std::string>("intersection_action", "intersection");
+	const double intersection_retry = node->declare_parameter<double>("intersection_min_retry", 2.0);
+	const double intersection_server_wait = node->declare_parameter<double>("intersection_server_wait_timeout", 5.0);
+	if (!std::isfinite(intersection_server_wait) || intersection_server_wait < 0.0) {
+		RCLCPP_FATAL(log, "intersection_server_wait_timeout must be finite and nonnegative");
+		return 1;
+	}
 	const double road_width = node->declare_parameter<double>("road_width", 3.0);
 	const auto turn_names = node->declare_parameter<std::vector<std::string>>("intersection_turns", std::vector<std::string>{});
 
@@ -104,6 +111,7 @@ int main(int argc, char **argv)
 		}
 	}
 	state->set_turns(turns);
+	bt::IntersectionInput intersection_input(node, state);
 
 	auto sub = node->create_subscription<DetArray>(
 		det_topic, rclcpp::SensorDataQoS(), 
@@ -133,12 +141,22 @@ int main(int argc, char **argv)
 		}
 	);
 
+	auto lane_gate = node->create_publisher<std_msgs::msg::Bool>(
+		enable_topic, rclcpp::QoS(1).reliable().transient_local());
+	lane_gate->publish(std_msgs::msg::Bool{});
 	BT::BehaviorTreeFactory factory;
 	factory.registerNodeType<bt::DecideAction>("DecideAction", state);
 	factory.registerNodeType<bt::StopRobot>("StopRobot");
-	factory.registerNodeType<bt::LaneFollowing>("LaneFollowing", node, enable_topic);
+	factory.registerNodeType<bt::BeginIntersection>("BeginIntersection", state);
+	factory.registerNodeType<bt::MarkIntersectionStopped>("MarkIntersectionStopped", state);
+	factory.registerNodeType<bt::RetryOnNextTick>("RetryOnNextTick");
+	factory.registerNodeType<bt::DisableLaneFollowing>("DisableLaneFollowing", lane_gate);
+	factory.registerNodeType<bt::LaneFollowing>("LaneFollowing", lane_gate);
 	factory.registerNodeType<bt::LaneChange>("LaneChange", BT::RosNodeParams(node, lane_change_action), state, min_retry);
-	factory.registerNodeType<bt::IntersectionTurn>("Intersection", BT::RosNodeParams(node, intersection_action), state, road_width);
+	BT::RosNodeParams intersection_params(node, intersection_action);
+	intersection_params.wait_for_server_timeout = std::chrono::duration_cast<std::chrono::milliseconds>(
+		std::chrono::duration<double>(intersection_server_wait));
+	factory.registerNodeType<bt::IntersectionTurn>("Intersection", intersection_params, state, road_width, intersection_retry);
 
 	BT::Tree tree = factory.createTreeFromFile(tree_file);
 	RCLCPP_INFO(log, "bt running: tree = %s, %.0f Hz", tree_file.c_str(), tick_rate);

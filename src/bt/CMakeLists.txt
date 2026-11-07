@@ -15,6 +15,11 @@ find_package(fusion_interfaces REQUIRED)
 find_package(lane_change_interfaces REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(intersection_interfaces_cpp REQUIRED)
+find_package(sensor_msgs REQUIRED)
+find_package(vision_interfaces REQUIRED)
+find_package(tf2_ros REQUIRED)
+find_package(tf2_sensor_msgs REQUIRED)
+find_package(tf2_geometry_msgs REQUIRED)
 
 add_executable(bt_executor src/bt_executor.cpp)
 target_include_directories(bt_executor PRIVATE 
@@ -23,7 +28,7 @@ ament_target_dependencies(
   bt_executor rclcpp rclcpp_action std_msgs 
   fusion_interfaces lane_change_interfaces 
   behaviortree_ros2 behaviortree_cpp
-  intersection_interfaces_cpp
+  intersection_interfaces_cpp sensor_msgs vision_interfaces tf2_ros tf2_sensor_msgs tf2_geometry_msgs
 )
 target_link_libraries(bt_executor 
     behaviortree_ros2::behaviortree_ros2)
@@ -45,6 +50,13 @@ if(BUILD_TESTING)
   add_executable(test_decision test/test_decision.cpp)
   target_include_directories(test_decision PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
   add_test(NAME test_decision COMMAND test_decision)
+  add_executable(test_intersection test/test_intersection.cpp)
+  target_include_directories(test_intersection PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+  ament_target_dependencies(test_intersection rclcpp rclcpp_action std_msgs
+    lane_change_interfaces intersection_interfaces_cpp behaviortree_cpp behaviortree_ros2)
+  target_link_libraries(test_intersection behaviortree_ros2::behaviortree_ros2)
+  target_compile_definitions(test_intersection PRIVATE TEST_TREE="${CMAKE_CURRENT_SOURCE_DIR}/trees/main.xml")
+  add_test(NAME test_intersection COMMAND test_intersection)
 
   
 endif()

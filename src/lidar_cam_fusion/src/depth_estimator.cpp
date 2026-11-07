@@ -89,7 +89,7 @@ std::string camera_frame;
      cy = msg->k[5];
      ok = true;
      camera_frame = msg->header.frame_id;
-     RCLCPP_INFO(this->get_logger(), "Received camera info");
+    //  RCLCPP_INFO(this->get_logger(), "Received camera info");
    }
 
    /*void cloud_callback(const sensor_msgs::msg::PointCloud2::SharedPtr msg){
@@ -201,7 +201,9 @@ std::string camera_frame;
         
         auto result = b;
 
-        if(b.is_stop_sign) {   
+        // Real, fake, and unclassified sign candidates all use the painted line.
+        // Authenticity only controls whether the BT stops before the intersection.
+        if(b.is_stop_sign || b.class_name == stop_sign_class) {
             result.n_pts = stop_line_n;
             result.depth_valid = false;  
             double age = std::fabs((rclcpp::Time(detections->header.stamp) - stop_line_stamp).seconds());

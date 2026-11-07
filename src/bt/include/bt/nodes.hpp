@@ -37,7 +37,8 @@ namespace bt
 			return {
 				BT::OutputPort<std::string>("decision"), 
 				BT::OutputPort<int>("obstacle_id"),
-				BT::OutputPort<bool>("needs_stop")
+				BT::OutputPort<bool>("needs_stop"),
+				BT::OutputPort<double>("distance")
 			};
 		}
 
@@ -47,6 +48,7 @@ namespace bt
 			setOutput("decision", std::string(to_string(d.action)));
 			setOutput("obstacle_id", static_cast<int>(d.obstacle_id));
 			setOutput("needs_stop", static_cast<bool>(d.needs_stop));
+			setOutput("distance", d.distance);
 
 			if (d.action != last_)
 			{
@@ -62,12 +64,78 @@ namespace bt
 		Action last_ = Action::NONE;
 	};
 
-	// stop !!- not done
+    // Retry failed asynchronous work on a later tree tick, without falling
+    // through to lane following or spinning in an unbounded retry loop.
+    class RetryOnNextTick : public BT::DecoratorNode {
+    public:
+        RetryOnNextTick(const std::string& name, const BT::NodeConfig& config)
+            : BT::DecoratorNode(name, config) {}
+        static BT::PortsList providedPorts() { return {}; }
+        BT::NodeStatus tick() override {
+            setStatus(BT::NodeStatus::RUNNING);
+            const auto result = child_node_->executeTick();
+            if (result == BT::NodeStatus::FAILURE) {
+                resetChild();
+                return BT::NodeStatus::RUNNING;
+            }
+            if (result == BT::NodeStatus::SUCCESS) resetChild();
+            return result;
+        }
+    };
+
+    class BeginIntersection : public BT::SyncActionNode {
+    public:
+        BeginIntersection(const std::string& name, const BT::NodeConfig& config,
+                          std::shared_ptr<SharedState> state)
+            : BT::SyncActionNode(name, config), state_(std::move(state)) {}
+        static BT::PortsList providedPorts() { return {BT::OutputPort<bool>("needs_stop")}; }
+        BT::NodeStatus tick() override {
+            const auto d = state_->begin_intersection();
+            setOutput("needs_stop", d.needs_stop);
+            return d.action == Action::INTERSECTION ? BT::NodeStatus::SUCCESS : BT::NodeStatus::FAILURE;
+        }
+    private:
+        std::shared_ptr<SharedState> state_;
+    };
+
+    class MarkIntersectionStopped : public BT::SyncActionNode {
+    public:
+        MarkIntersectionStopped(const std::string& name, const BT::NodeConfig& config,
+                                std::shared_ptr<SharedState> state)
+            : BT::SyncActionNode(name, config), state_(std::move(state)) {}
+        static BT::PortsList providedPorts() { return {BT::OutputPort<bool>("needs_stop")}; }
+        BT::NodeStatus tick() override {
+            state_->mark_intersection_stopped();
+            setOutput("needs_stop", false);
+            return BT::NodeStatus::SUCCESS;
+        }
+    private:
+        std::shared_ptr<SharedState> state_;
+    };
+
+    class DisableLaneFollowing : public BT::SyncActionNode {
+    public:
+        DisableLaneFollowing(const std::string& name, const BT::NodeConfig& config,
+                             rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr publisher)
+            : BT::SyncActionNode(name, config), pub_(std::move(publisher)) {}
+        static BT::PortsList providedPorts() { return {}; }
+        BT::NodeStatus tick() override {
+            std_msgs::msg::Bool msg;
+            msg.data = false;
+            pub_->publish(msg);
+            return BT::NodeStatus::SUCCESS;
+        }
+    private:
+        rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr pub_;
+    };
+
+	// Placeholder: returning FAILURE keeps the lane gate closed. Replace with
+    // the stop action client; only SUCCESS permits the intersection goal.
 	class StopRobot : public BT::SyncActionNode
 	{
 	public:
 		StopRobot(const std::string &name, const BT::NodeConfig &config) : BT::SyncActionNode(name, config) {}
-		static BT::PortsList providedPorts() { return {}; }
+		static BT::PortsList providedPorts() { return {BT::InputPort<double>("distance", 0.0, "Distance to stop target; intersection stops use the stop line")}; }
 
 		BT::NodeStatus tick() override
 		{
@@ -89,12 +157,9 @@ namespace bt
 	class LaneFollowing : public BT::StatefulActionNode
 	{
 	public:
-		LaneFollowing(const std::string &name, const BT::NodeConfig &config, rclcpp::Node::SharedPtr node,
-					  const std::string &topic)
-			: BT::StatefulActionNode(name, config)
-		{
-			pub_ = node->create_publisher<std_msgs::msg::Bool>(topic, rclcpp::QoS(1).reliable().transient_local());
-		}
+        LaneFollowing(const std::string &name, const BT::NodeConfig &config,
+                      rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr publisher)
+			: BT::StatefulActionNode(name, config), pub_(std::move(publisher)) {}
 		static BT::PortsList providedPorts() { return {}; }
 
 		BT::NodeStatus onStart() override
@@ -186,8 +251,8 @@ namespace bt
 			using IntersectionAction = intersection_interfaces_cpp::action::Intersection;
 
 			explicit IntersectionTurn(const std::string& name, const BT::NodeConfig& config, const BT::RosNodeParams& params,
-									std::shared_ptr<SharedState> state, double road_width)
-				: RosActionNode<IntersectionAction>(name, config, params), state_(std::move(state)), road_width_(road_width) {}
+									std::shared_ptr<SharedState> state, double road_width, double min_retry)
+				: RosActionNode<IntersectionAction>(name, config, params), state_(std::move(state)), road_width_(road_width), min_retry_(min_retry) {}
 
 			static BT::PortsList providedPorts() {
 				return providedBasicPorts({});
@@ -195,13 +260,15 @@ namespace bt
 
 			bool setGoal(Goal& goal) override
 			{
-				const Decision d = state_->current();
-				if (d.action != Action::INTERSECTION)
+				if (state_->now() - last_fail_ < min_retry_) return false;
+				const Decision d = state_->active_intersection();
+				if (d.action != Action::INTERSECTION || d.needs_stop)
 					return false;
 				uint8_t turn = 0;
 
 				if (!state_->peek_turn(turn))
 				{
+					last_fail_ = state_->now();
 					RCLCPP_ERROR(logger(), "Intersection reached but turn list is empty.");
 					return false;
 				}
@@ -209,32 +276,36 @@ namespace bt
 				sent_ = d;
 				goal.turn_direction = turn;
 				goal.road_width = static_cast<float>(road_width_);
-    			return true;
+				return true;
 			}
 
 			BT::NodeStatus onResultReceived(const WrappedResult &wr) override
 			{
 				if (wr.code == rclcpp_action::ResultCode::SUCCEEDED && wr.result && wr.result->success) {
-					state_->pop_turn();
-					state_->mark_handled(sent_);   // only after the server confirmed
+					state_->complete_intersection(sent_);
 					return BT::NodeStatus::SUCCESS;
 				}
 
+				last_fail_ = state_->now();
 				RCLCPP_WARN(logger(), "intersection failed: %s", wr.result ? wr.result->message.c_str() : "?");
 				return BT::NodeStatus::FAILURE;
 			}
 
 			BT::NodeStatus onFailure(BT::ActionNodeErrorCode error) override {
-    			if (error != BT::INVALID_GOAL) 
-					RCLCPP_WARN(logger(), "Intersection: %s", BT::toStr(error));
-    			return BT::NodeStatus::FAILURE;
-  			}
+				if (error != BT::INVALID_GOAL) {
+                        last_fail_ = state_->now();
+                        RCLCPP_WARN(logger(), "Intersection: %s", BT::toStr(error));
+                    }
+				return BT::NodeStatus::FAILURE;
+			}
   
 			void onHalt() override {}   // the wrapper cancels the goal; the server then clears the path
 		
 		private:
 			std::shared_ptr<SharedState> state_;
 			double road_width_;
+                double min_retry_;
+                double last_fail_ = -1e9;
 			Decision sent_;
 	};
 

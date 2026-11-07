@@ -1,85 +1,121 @@
-// Thread-safe bridge between the detection subscriber and the BT nodes.
+// Independent perception streams and a latched stop/intersection maneuver.
 #pragma once
+#include <cstdint>
+#include <deque>
 #include <functional>
 #include <mutex>
 #include <utility>
 #include <vector>
-#include <deque>
-#include <cstdint>
-
 #include "bt/decision.hpp"
 
-namespace bt
-{
+namespace bt {
+class SharedState {
+public:
+    SharedState(DecisionConfig cfg, double stale_timeout, std::function<double()> clock)
+        : obstacles_(rules_for(cfg, false)), intersections_(rules_for(cfg, true)),
+          stale_(stale_timeout), clock_(std::move(clock)) {}
 
-	class SharedState
-	{
-	public:
-		// stale_timeout: if no detection list arrived for this long, the decision falls back to NONE
-		SharedState(DecisionConfig cfg, double stale_timeout, std::function<double()> clock)
-			: decider_(std::move(cfg)), stale_(stale_timeout), clock_(std::move(clock)) {}
+    double now() const { return clock_(); }
 
-		double now() const { return clock_(); }
+    void on_detections(const std::vector<Detection>& dets) {
+        std::lock_guard<std::mutex> lock(m_);
+        obstacle_time_ = now();
+        obstacle_ = obstacles_.update(dets, obstacle_time_);
+    }
 
-		void on_detections(const std::vector<Detection> &dets)
-		{
-			const double t = clock_();
-			std::lock_guard<std::mutex> l(m_);
-			decision_ = decider_.update(dets, t);
-			t_msg_ = t;
-			have_ = true;
-		}
+    // Called once per sign-depth detection list, or per cloud when no sign is present.
+    void on_intersection_detections(const std::vector<Detection>& dets, bool reset_stop_sign = false) {
+        std::lock_guard<std::mutex> lock(m_);
+        if (reset_stop_sign) intersections_.clear_stop_sign();
+        intersection_time_ = now();
+        intersection_ = intersections_.update(dets, intersection_time_);
+    }
 
-		Decision current()
-		{
-			const double t = clock_();
-			std::lock_guard<std::mutex> l(m_);
-			if (!have_ || t - t_msg_ > stale_)
-				return Decision{};
-			return decision_;
-		}
+    Decision current() {
+        std::lock_guard<std::mutex> lock(m_);
+        return current_locked();
+    }
 
-		// a lane change for this exact decision succeeded
-		void mark_handled(const Decision &d)
-		{
-			const double t = clock_();
-			std::lock_guard<std::mutex> l(m_);
-			decider_.mark_handled(d, t);
-			if (decision_.action == Action::CHANGE || decision_.action == Action::INTERSECTION)
-				decision_ = Decision{};
-		}
+    Decision begin_intersection() {
+        std::lock_guard<std::mutex> lock(m_);
+        if (active_.action != Action::INTERSECTION) {
+            const auto d = current_locked();
+            if (d.action == Action::INTERSECTION) active_ = d;
+        }
+        return active_;
+    }
 
-		void set_turns(const std::vector<uint8_t>& t)
-		{
-			std::lock_guard<std::mutex> l(m_);
-			turns_.assign(t.begin(), t.end());
-		}
+    Decision active_intersection() {
+        std::lock_guard<std::mutex> lock(m_);
+        return active_;
+    }
 
-		bool peek_turn(uint8_t& turn)
-		{
-			std::lock_guard<std::mutex> l(m_);
-			if (turns_.empty())
-				return false;
-			turn = turns_.front();
-			return true;
-		}
+    void mark_intersection_stopped() {
+        std::lock_guard<std::mutex> lock(m_);
+        active_.needs_stop = false;
+    }
 
-		void pop_turn()
-		{
-			std::lock_guard<std::mutex> l(m_);
-			if (!turns_.empty())
-				turns_.pop_front();
-		}
+    void complete_intersection(const Decision& sent) {
+        std::lock_guard<std::mutex> lock(m_);
+        intersections_.mark_handled(sent, now());
+        last_completed_ = now();
+        active_ = intersection_ = Decision{};
+        if (!turns_.empty()) turns_.pop_front();
+    }
 
-	private:
-		std::mutex m_;
-		Decider decider_;
-		Decision decision_;
-		double stale_;
-		double t_msg_ = 0.0;
-		bool have_ = false;
-		std::function<double()> clock_;
-		std::deque<uint8_t> turns_;
-	};
+    double last_intersection_completed() {
+        std::lock_guard<std::mutex> lock(m_);
+        return last_completed_;
+    }
 
+    void mark_handled(const Decision& d) {
+        std::lock_guard<std::mutex> lock(m_);
+        obstacles_.mark_handled(d, now());
+        if (obstacle_.action == d.action && obstacle_.obstacle_id == d.obstacle_id)
+            obstacle_ = Decision{};
+    }
+
+    void set_turns(const std::vector<uint8_t>& turns) {
+        std::lock_guard<std::mutex> lock(m_);
+        turns_.assign(turns.begin(), turns.end());
+    }
+
+    bool peek_turn(uint8_t& turn) {
+        std::lock_guard<std::mutex> lock(m_);
+        if (turns_.empty()) return false;
+        turn = turns_.front();
+        return true;
+    }
+
+private:
+    static DecisionConfig rules_for(DecisionConfig cfg, bool intersection) {
+        // Stop lines have no tracker IDs, but their odom anchors are persistent.
+        if (intersection) cfg.pseudo_ttl = cfg.handled_ttl;
+        for (auto it = cfg.classes.begin(); it != cfg.classes.end();) {
+            const bool is_intersection = it->second.action == Action::INTERSECTION || it->second.mark_stop_sign;
+            if (is_intersection != intersection) it = cfg.classes.erase(it);
+            else ++it;
+        }
+        return cfg;
+    }
+
+    Decision current_locked() const {
+        const double t = now();
+        const bool fresh_obstacle = t - obstacle_time_ <= stale_;
+        if (fresh_obstacle && obstacle_.action == Action::STOP) return obstacle_;
+        // Survives stop-line disappearance, a long stop, and pedestrian preemption.
+        if (active_.action == Action::INTERSECTION) return active_;
+        if (t - intersection_time_ <= stale_ && intersection_.action == Action::INTERSECTION)
+            return intersection_;
+        return fresh_obstacle ? obstacle_ : Decision{};
+    }
+
+    std::mutex m_;
+    Decider obstacles_, intersections_;
+    Decision obstacle_, intersection_, active_;
+    double stale_;
+    double obstacle_time_ = -1e9, intersection_time_ = -1e9, last_completed_ = -1e9;
+    std::function<double()> clock_;
+    std::deque<uint8_t> turns_;
+};
 } // namespace bt

@@ -1,21 +1,35 @@
 <root BTCPP_format="4" main_tree_to_execute="Main">
     <BehaviorTree ID="Main">
-
         <ReactiveSequence>
-
-            <DecideAction decision="{decision}" obstacle_id="{obstacle_id}"/>
-
+            <DecideAction decision="{decision}" obstacle_id="{obstacle_id}" distance="{stop_distance}"/>
             <ReactiveFallback>
-
-                <Sequence>
+                <!-- Pedestrian/emergency stop can preempt a latched intersection. -->
+                <ReactiveSequence>
                     <ScriptCondition code="decision == 'stop'"/>
-                    <StopRobot/>
+                    <DisableLaneFollowing/>
+                    <KeepRunningUntilFailure>
+                        <ForceSuccess><StopRobot distance="{stop_distance}"/></ForceSuccess>
+                    </KeepRunningUntilFailure>
+                </ReactiveSequence>
+                <Sequence>
+                    <ScriptCondition code="decision == 'intersection'"/>
+                    <BeginIntersection needs_stop="{needs_stop}"/>
+                    <DisableLaneFollowing/>
+                    <RetryOnNextTick>
+                        <Sequence>
+                            <Fallback>
+                                <ScriptCondition code="needs_stop == false"/>
+                                <Sequence>
+                                    <StopRobot distance="{stop_distance}"/>
+                                    <MarkIntersectionStopped needs_stop="{needs_stop}"/>
+                                </Sequence>
+                            </Fallback>
+                            <Intersection/>
+                        </Sequence>
+                    </RetryOnNextTick>
                 </Sequence>
- 
                 <Parallel success_count="-1" failure_count="1">
-
                     <LaneFollowing/>
-                    <!--check the failure condition once -->
                     <KeepRunningUntilFailure>
                         <ForceSuccess>
                             <Sequence>
@@ -24,25 +38,8 @@
                             </Sequence>
                         </ForceSuccess>
                     </KeepRunningUntilFailure>
-                    <KeepRunningUntilFailure>
-                        <ForceSuccess>
-                            <Sequence>
-                                <ScriptCondition code="decision == 'intersection'"/>
-                                <Intersection/>
-                            </Sequence>
-                        </ForceSuccess>
-                    </KeepRunningUntilFailure>
-
                 </Parallel>
- 
             </ReactiveFallback>
-
         </ReactiveSequence>
-
     </BehaviorTree>
 </root>
-
-<!--One known gap I left: 
-//if the tree halts LaneChange after the server already flipped the lane but before the result was processed, 
-//the obstacle isn't marked handled, and a second lane change could follow once the stop clears. 
-//The window is tiny, because the server answers instantly.  -->

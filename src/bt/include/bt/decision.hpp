@@ -3,7 +3,7 @@
  every incoming detection list:
 1. drop invalid / low-score / unknown-class detections
 2. keep only detections which are already inside their OWN class trigger distance
-3. priority by action: STOP > CHANGE > NONE ( intersecn and parking )
+3. priority by action: STOP > INTERSECTION > CHANGE > NONE
 4. an action must be seen in confirm consecutive lists before it is reported (stop reacts faster)
 5. a CHANGE obstacle that was already handled by a lane change is skipped:
 		- with a real obstacle id (id >= 0): same id = same obstacle
@@ -59,6 +59,7 @@ namespace bt
 		long id = -1;
 		double x = 0.0;		  // Global Odom X
 		double y = 0.0;		  // Global Odom Y
+		double observed_at = std::numeric_limits<double>::quiet_NaN();
 		double local_y = 0.0; // Local Base Y for lateral filter
 	};
 
@@ -114,23 +115,22 @@ namespace bt
 				if (!d.valid || d.score < cfg_.min_score || d.n_pts < cfg_.min_points)
 					continue;
 
-				// Filter out detections based on distance
-				if (!std::isfinite(d.distance) || d.distance < cfg_.min_distance)
+				const auto it = cfg_.classes.find(d.cls);
+				if (it == cfg_.classes.end())
+					continue;
+				const ClassRule &r = it->second;
+				// A stop line remains valid right up to the robot. The obstacle
+				// noise threshold must not discard a line after stopping at it.
+				const double min_distance = (r.action == Action::INTERSECTION || r.mark_stop_sign)
+					? 0.0 : cfg_.min_distance;
+				if (!std::isfinite(d.distance) || d.distance < min_distance)
 					continue;
 
 				// Filter out clutter that is physically way outside our lane width (using local base frame Y)
 				if (std::abs(d.local_y) > cfg_.max_lateral_offset)
 					continue;
-
-				const auto it = cfg_.classes.find(d.cls);
-				// Detection doesnt have an action
-				if (it == cfg_.classes.end() || it->second.action == Action::NONE)
-					continue;
-
-				const ClassRule &r = it->second;
-
 				if (r.mark_stop_sign && d.distance <= r.trigger_distance) 
-					stop_sign_time_ = now;
+					stop_sign_time_ = std::isfinite(d.observed_at) ? d.observed_at : now;
 
 				if (r.action == Action::NONE)
 					continue;
@@ -179,6 +179,8 @@ namespace bt
 			}
 			return out;
 		}
+
+		void clear_stop_sign() { stop_sign_time_ = -1e9; }
 
 		// Call when a action for exactly this decision (the one the goal was sent for) succeeded.
 		void mark_handled(const Decision &d, double now)
