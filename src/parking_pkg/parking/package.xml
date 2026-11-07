@@ -12,6 +12,8 @@
   <depend>std_msgs</depend>
   <depend>std_srvs</depend>
   <depend>tf2_ros</depend>
+  <depend>nav_msgs</depend>
+  <depend>map_msgs</depend>
   <depend>python3-numpy</depend>
   <export><build_type>ament_python</build_type></export>
 </package>

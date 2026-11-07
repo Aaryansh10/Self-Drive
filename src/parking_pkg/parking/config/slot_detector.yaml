@@ -1,13 +1,23 @@
 slot_detector:
   ros__parameters:
-    cloud_topic: /pc_whitelane
-    world_frame: odom
+    input_mode: map           
+    map_topic: /lane_map/white   
+    robot_frame: link_base
+    map_window: 14.0          # m around the robot that is processed
+    occ_threshold: 65         # cells >= this count as line
+    cloud_topic: /pc_whitelane   
+    world_frame: odom         # in map mode the map's own frame_id is used
     min_range: 0.8            # m, in link_base
     max_range: 10.0           # m, IPM noise grows with range
-    detect_rate: 3.0
-    publish_min_conf: 0.15
-    # --- slot geometry priors: MEASURE these from the rules / sim map and tighten ---
-    width_range: [1.8, 6.0]   # slot width (back-line length) [m]
+    detect_rate: 2.0          # line fitting runs at this rate ( the heavy part)
+    max_points: 5000          # cap on points given to RANSAC (bounds CPU)
+    tf_max_wait: 0.5          # s a cloud may wait for TF before being dropped
+    publish_min_conf: 0.4     # raise to hide weak/unconfirmed slots
+    max_yaw_rate: 0.3         # rad/s; clouds taken while turning faster are skipped
+    min_voxel_hits: 4         # a map cell must be seen in >= this many frames
+    nominal_depth: 0.0        # set to the real slot depth (m) to draw partial slots full-size
+    
+    width_range: [1.8, 8.0]   # slot width (back-line length) [m]
     depth_min: 1.5            # shortest visible side [m]
     side_len_max: 9.0
-    partial_reject_ref_inside: true   # set false for PULL-OUT (robot starts inside the slot)
+    partial_reject_ref_inside: true   #  false for PULL-OUT (robot starts inside the slot)

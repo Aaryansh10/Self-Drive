@@ -18,7 +18,7 @@ import numpy as np
 @dataclass
 class Params:
     voxel: float = 0.05            # map / downsample resolution [m]
-    min_voxel_hits: int = 2        # a voxel must be seen this often to be used
+    min_voxel_hits: int = 4        # a voxel must be seen in this many DIFFERENT frames to be used
     ransac_iters: int = 300
     ransac_tol: float = 0.05       # inlier distance to a line [m]
     min_seg_len: float = 0.8       # shortest line segment kept [m]
@@ -30,6 +30,7 @@ class Params:
     width_range: tuple = (1.8, 6.0)    # slot width  (back-line length) [m]
     depth_min: float = 1.5             # min visible side length [m]
     width_mismatch: float = 0.5        # |back length - side separation| [m]
+    dup_offset: float = 0.18           # parallel lines closer than this are merged (ghost copies) [m]
     side_len_max: float = 9.0          # longer lines are road/lane edges, not slot sides
     partial_reject_ref_inside: bool = True   # robot between the two sides => it is a lane (False for pull-out)
     seed: int = 0
@@ -76,11 +77,12 @@ class Slot:
     back_seen: bool = True    # False => depth is only a lower bound (back line not visible)
     corners: np.ndarray = field(default=None)   # 4x2: ent_L, ent_R, back_R, back_L (y-left order)
 
-    def polygon(self):
+    def polygon(self, depth=None):
+        d = self.depth if depth is None else depth
         c, s = np.cos(self.yaw), np.sin(self.yaw)
         R = np.array([[c, -s], [s, c]])
         hw = self.width / 2
-        local = np.array([[0, hw], [0, -hw], [self.depth, -hw], [self.depth, hw]])
+        local = np.array([[0, hw], [0, -hw], [d, -hw], [d, hw]])
         return local @ R.T + self.center
 
 
@@ -96,10 +98,10 @@ class VoxelMap:
         if len(xy) == 0:
             return
         idx = np.floor(xy / self.v).astype(np.int64)
-        keys, cnt = np.unique(idx, axis=0, return_counts=True)
+        keys = np.unique(idx, axis=0)          # one vote per voxel per frame
         h = self.hits
-        for k, c in zip(map(tuple, keys), cnt):
-            h[k] = min(h.get(k, 0) + int(min(c, 3)), 50)
+        for k in map(tuple, keys):
+            h[k] = min(h.get(k, 0) + 1, 50)
 
     def prune(self, centre, radius):
         c = np.floor(np.asarray(centre) / self.v).astype(np.int64)
@@ -179,6 +181,40 @@ def _end_near(seg, pt, tol):
     return (seg.p0, seg.p1) if d0 <= d1 else (seg.p1, seg.p0)
 
 
+def merge_duplicates(segs, p: Params):
+    """Merge near-collinear / near-parallel ghost copies of the same painted line."""
+    segs = list(segs)
+    changed = True
+    while changed:
+        changed = False
+        for i in range(len(segs)):
+            for j in range(i + 1, len(segs)):
+                a, b = segs[i], segs[j]
+                if line_angle_diff(a.angle, b.angle) > np.deg2rad(6.0):
+                    continue
+                u = a.unit if a.length >= b.length else b.unit
+                nrm = np.array([-u[1], u[0]])
+                o = (a.p0 + a.p1) / 2
+                da = ((a.p0 + a.p1) / 2 - o) @ nrm
+                db = ((b.p0 + b.p1) / 2 - o) @ nrm
+                if abs(db - da) > p.dup_offset:
+                    continue
+                ta = sorted([(a.p0 - o) @ u, (a.p1 - o) @ u])
+                tb = sorted([(b.p0 - o) @ u, (b.p1 - o) @ u])
+                if max(ta[0], tb[0]) - min(ta[1], tb[1]) > p.gap_max:      # far apart along the line
+                    continue
+                wa, wb = a.n_pts, b.n_pts
+                off = (wa * da + wb * db) / (wa + wb)
+                lo, hi = min(ta[0], tb[0]), max(ta[1], tb[1])
+                segs[i] = Segment(o + u * lo + nrm * off, o + u * hi + nrm * off, wa + wb)
+                del segs[j]
+                changed = True
+                break
+            if changed:
+                break
+    return segs
+
+
 def split_at_junctions(segs, p: Params):
     """Split a segment where a perpendicular segment touches its interior (shared back lines)."""
     out = []
@@ -213,7 +249,7 @@ def split_at_junctions(segs, p: Params):
 def find_slots(segs, p: Params, ref_xy=None):
     """U-shaped slots (back + 2 sides). If ref_xy (e.g. robot position) is given, also returns
     partial slots made of two parallel sides when the back line is not (yet) visible."""
-    segs = split_at_junctions(segs, p)
+    segs = split_at_junctions(merge_duplicates(segs, p), p)
     out, used = [], set()
     ptol = np.deg2rad(p.parallel_tol_deg)
     qtol = np.deg2rad(p.perp_tol_deg)
@@ -416,3 +452,88 @@ def parse_xy(data: bytes, point_step: int, n_points: int, offsets=(0, 4)):
 def to_odom(xy, tx, ty, yaw):
     c, s = np.cos(yaw), np.sin(yaw)
     return xy @ np.array([[c, s], [-s, c]]) + np.array([tx, ty])
+
+
+# ------------------------------------------------- non-blocking TF queue
+def drain_pending(pending, lookup, ingest, now, max_wait=0.5, max_len=25):
+    """Process queued clouds in order without ever blocking.
+
+    pending : deque of (t_arrived, msg)
+    lookup  : msg -> ('ok', tf) | ('future', None) | ('fail', None)
+              'future' = TF for this stamp has not arrived yet, 'fail' = too old / frame missing
+    ingest  : (msg, tf) -> None
+    Returns (n_processed, n_dropped).
+    """
+    done = dropped = 0
+    while pending:
+        t_arr, msg = pending[0]
+        status, tf = lookup(msg)
+        if status == "ok":
+            pending.popleft()
+            ingest(msg, tf)
+            done += 1
+        elif status == "future" and (now - t_arr) <= max_wait and len(pending) <= max_len:
+            break                      # wait for TF to catch up; later clouds are even newer
+        else:                          # missing/too old, or waited too long, or queue overflow
+            pending.popleft()
+            dropped += 1
+    return done, dropped
+
+
+# ------------------------------------------- occupancy-grid (/map) input
+def thin_binary(img, max_iter=60):
+    """Zhang-Suen thinning (vectorised numpy): thick inflated line bands -> 1-cell centrelines."""
+    img = img.astype(np.uint8).copy()
+    for _ in range(max_iter):
+        changed = False
+        for step in (0, 1):
+            P = np.pad(img, 1)
+            p2, p3, p4, p5 = P[:-2, 1:-1], P[:-2, 2:], P[1:-1, 2:], P[2:, 2:]
+            p6, p7, p8, p9 = P[2:, 1:-1], P[2:, :-2], P[1:-1, :-2], P[:-2, :-2]
+            nb = [p2, p3, p4, p5, p6, p7, p8, p9]
+            B = sum(n.astype(np.int16) for n in nb)
+            A = sum(((nb[i] == 0) & (nb[(i + 1) % 8] == 1)).astype(np.int16) for i in range(8))
+            if step == 0:
+                c = ((p2 * p4 * p6) == 0) & ((p4 * p6 * p8) == 0)
+            else:
+                c = ((p2 * p4 * p8) == 0) & ((p2 * p6 * p8) == 0)
+            m = (img == 1) & (B >= 2) & (B <= 6) & (A == 1) & c
+            if m.any():
+                img[m] = 0
+                changed = True
+        if not changed:
+            break
+    return img.astype(bool)
+
+
+def grid_to_points(data, width, height, res, ox, oy, oyaw, center_xy, radius,
+                   occ_thresh=65, thin=True):
+    """nav_msgs/OccupancyGrid -> Nx2 world points (cell centres of occupied cells, thinned).
+
+    Only a (2*radius)^2 window around center_xy is processed, so big maps stay cheap.
+    """
+    arr = np.asarray(data, dtype=np.int8).reshape(height, width)
+    c, s = np.cos(oyaw), np.sin(oyaw)
+    d = np.asarray(center_xy, float) - np.array([ox, oy])
+    g = np.array([c * d[0] + s * d[1], -s * d[0] + c * d[1]])       # centre in grid frame
+    ci, cj = int(g[1] / res), int(g[0] / res)                         # row, col
+    r = int(radius / res)
+    i0, i1 = max(ci - r, 0), min(ci + r + 1, height)
+    j0, j1 = max(cj - r, 0), min(cj + r + 1, width)
+    if i0 >= i1 or j0 >= j1:
+        return np.zeros((0, 2))
+    occ = arr[i0:i1, j0:j1] >= occ_thresh
+    if thin and occ.any():
+        occ = thin_binary(occ)
+    ii, jj = np.nonzero(occ)
+    gx, gy = (jj + j0 + 0.5) * res, (ii + i0 + 0.5) * res
+    return np.stack([c * gx - s * gy + ox, s * gx + c * gy + oy], 1)
+
+
+def apply_grid_update(grid2d, x, y, w, h, data):
+    """Apply a map_msgs/OccupancyGridUpdate patch (cell coords x,y,w,h) in place. Returns True if applied."""
+    H, W = grid2d.shape
+    if w <= 0 or h <= 0 or x < 0 or y < 0 or x + w > W or y + h > H or len(data) != w * h:
+        return False
+    grid2d[y:y + h, x:x + w] = np.asarray(data, dtype=np.int8).reshape(h, w)
+    return True

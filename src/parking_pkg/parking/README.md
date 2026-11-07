@@ -2,6 +2,8 @@
 
 Build:   colcon build --packages-select parking && source install/setup.bash
 Run:     ros2 launch parking slot_detector.launch.py
+Input:   default input_mode=map reads the team occupancy grid (set map_topic to your Map display's topic);
+         input_mode=cloud accumulates /pc_whitelane itself (needs clean TF).
 RViz:    fixed frame `odom`; add MarkerArray /parking/markers and PointCloud2 /parking/map_points
 Lock:    ros2 service call /parking/lock_best std_srvs/srv/Trigger   (unlock: /parking/unlock)
 Tests:   python3 test/test_slot_core.py        (synthetic, no ROS needed)
