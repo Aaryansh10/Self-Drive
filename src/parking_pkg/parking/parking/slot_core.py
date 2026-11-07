@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 import numpy as np
 
 
-# ----------------------------------------------------------------- params
+#  params
 @dataclass
 class Params:
     voxel: float = 0.05            # map / downsample resolution [m]
@@ -36,7 +36,7 @@ class Params:
     seed: int = 0
 
 
-# ---------------------------------------------------------------- helpers
+#  helpers
 def wrap(a):
     return (a + np.pi) % (2 * np.pi) - np.pi
 
@@ -86,7 +86,7 @@ class Slot:
         return local @ R.T + self.center
 
 
-# ------------------------------------------------------ voxel point map
+# voxel point map
 class VoxelMap:
     """Static line map in the odom frame; accumulates detections over time."""
 
@@ -116,7 +116,7 @@ class VoxelMap:
         return (k + 0.5) * self.v if len(k) else np.zeros((0, 2))
 
 
-# ------------------------------------------------------ line extraction
+#  line extraction
 def extract_segments(pts, p: Params):
     rng = np.random.default_rng(p.seed)
     segs = []
@@ -171,7 +171,7 @@ def extract_segments(pts, p: Params):
     return segs
 
 
-# ----------------------------------------------------------- U detection
+#  U detection
 def _end_near(seg, pt, tol):
     """Return (end_point, far_point) of seg whose end is within tol of pt, else None."""
     d0 = np.linalg.norm(seg.p0 - pt)
@@ -378,7 +378,7 @@ def _dedupe(slots):
     return kept
 
 
-# --------------------------------------------------------------- tracking
+#  tracking
 @dataclass
 class Track:
     id: int
@@ -439,7 +439,7 @@ class SlotTracker:
             t.locked = (t.id == track_id)
 
 
-# ------------------------------------------------------- ROS-side helpers
+#  ROS-side helpers
 def parse_xy(data: bytes, point_step: int, n_points: int, offsets=(0, 4)):
     """x, y (float32) from a PointCloud2 buffer without sensor_msgs_py."""
     raw = np.frombuffer(data, dtype=np.uint8, count=n_points * point_step).reshape(n_points, point_step)
@@ -454,7 +454,7 @@ def to_odom(xy, tx, ty, yaw):
     return xy @ np.array([[c, s], [-s, c]]) + np.array([tx, ty])
 
 
-# ------------------------------------------------- non-blocking TF queue
+#  non-blocking TF queue
 def drain_pending(pending, lookup, ingest, now, max_wait=0.5, max_len=25):
     """Process queued clouds in order without ever blocking.
 
@@ -480,7 +480,7 @@ def drain_pending(pending, lookup, ingest, now, max_wait=0.5, max_len=25):
     return done, dropped
 
 
-# ------------------------------------------- occupancy-grid (/map) input
+#  occupancy-grid (/map) input
 def thin_binary(img, max_iter=60):
     """Zhang-Suen thinning (vectorised numpy): thick inflated line bands -> 1-cell centrelines."""
     img = img.astype(np.uint8).copy()
