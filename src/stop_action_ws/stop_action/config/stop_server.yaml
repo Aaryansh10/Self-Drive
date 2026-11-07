@@ -1,0 +1,38 @@
+stop_action_server:
+  ros__parameters:
+    use_sim_time: true
+
+    # --- topics ---
+    odom_topic: /odom
+    cmd_vel_topic: /cmd_vel             # sole actuator publisher; navigation enters via drive_cmd_topic
+    drive_cmd_topic: /cmd_vel_drive
+    lane_detections_topic: /detections_lane
+    detection_timeout: 1.0             # stale lane data never releases a stopped robot
+    pedestrian_clear_time: 0.5         # continuous clear observations before release
+
+    # --- braking model ---
+    control_rate_hz: 20.0
+    a_comfort: 1.0                      # m/s^2, deceleration of the braking curve
+    a_max: 2.5                          # m/s^2, hardest decel (<= Nav2 velocity_smoother max_decel)
+    latency: 0.15                       # s, command -> Gazebo response delay (tune in sim)
+    target_fraction: 0.5                # where to aim in [min_distance, max_distance]: 0 = min, 1 = max
+    stop_speed_threshold: 0.03          # m/s, below this the bot counts as stopped
+    sensor_to_front_offset: 0.0         # m, sensor -> front bumper (subtracted from goal.obstacle_distance)
+    goal_timeout: 30.0                  # s, timeout for approach/braking only; STOPPED may wait indefinitely
+
+    default_profile:
+      min_distance: 0.5
+      max_distance: 1.5
+      max_speed: 2.2
+
+    profile_names: [pedestrian, stop_sign]
+    profiles:
+      pedestrian:
+        min_distance: 1.5
+        max_distance: 2.1
+        max_speed: 2.2
+      # Distances are measured to the corresponding stop line, not the sign.
+      stop_sign:
+        min_distance: 0.05
+        max_distance: 0.3
+        max_speed: 2.2

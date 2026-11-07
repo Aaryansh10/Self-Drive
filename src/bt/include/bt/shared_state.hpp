@@ -1,5 +1,6 @@
 // Independent perception streams and a latched stop/intersection maneuver.
 #pragma once
+#include <algorithm>
 #include <cstdint>
 #include <deque>
 #include <functional>
@@ -20,7 +21,23 @@ public:
     void on_detections(const std::vector<Detection>& dets) {
         std::lock_guard<std::mutex> lock(m_);
         obstacle_time_ = now();
-        obstacle_ = obstacles_.update(dets, obstacle_time_);
+        auto eligible = dets;
+        // Obstacle memory may retain a pedestrian after live perception confirms clearance.
+        if (have_lane_ && obstacle_time_ - lane_msg_ <= stale_ && !pedestrian_in_lane_ &&
+            obstacle_time_ - lane_clear_since_ >= 0.5) {
+            eligible.erase(std::remove_if(eligible.begin(), eligible.end(),
+                [](const Detection& d) { return d.cls == "pedestrian"; }), eligible.end());
+        }
+        obstacle_ = obstacles_.update(eligible, obstacle_time_);
+    }
+
+    void on_lane(bool pedestrian_in_lane) {
+        std::lock_guard<std::mutex> lock(m_);
+        const double t = now();
+        if (!have_lane_ || pedestrian_in_lane || t - lane_msg_ > stale_) lane_clear_since_ = t;
+        pedestrian_in_lane_ = pedestrian_in_lane;
+        lane_msg_ = t;
+        have_lane_ = true;
     }
 
     // Called once per sign-depth detection list, or per cloud when no sign is present.
@@ -68,10 +85,12 @@ public:
         return last_completed_;
     }
 
+    // a lane change / stop for this exact decision succeeded
     void mark_handled(const Decision& d) {
         std::lock_guard<std::mutex> lock(m_);
         obstacles_.mark_handled(d, now());
-        if (obstacle_.action == d.action && obstacle_.obstacle_id == d.obstacle_id)
+        if (obstacle_.action == d.action && obstacle_.cls == d.cls &&
+            obstacle_.obstacle_id == d.obstacle_id && d.cls != "pedestrian")
             obstacle_ = Decision{};
     }
 
@@ -115,6 +134,8 @@ private:
     Decision obstacle_, intersection_, active_;
     double stale_;
     double obstacle_time_ = -1e9, intersection_time_ = -1e9, last_completed_ = -1e9;
+    bool have_lane_ = false, pedestrian_in_lane_ = true;
+    double lane_msg_ = 0.0, lane_clear_since_ = 0.0;
     std::function<double()> clock_;
     std::deque<uint8_t> turns_;
 };

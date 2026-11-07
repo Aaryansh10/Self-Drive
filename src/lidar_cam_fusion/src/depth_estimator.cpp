@@ -70,6 +70,7 @@ class Fusion : public rclcpp::Node {
     rclcpp::Subscription<cl>::SharedPtr stop_line_subscription;
     bool stop_line_valid = false;
     float stop_line_dist = 0.0f;
+    geometry_msgs::msg::Point stop_line_position;
     size_t stop_line_n = 0;
     rclcpp::Time stop_line_stamp{0, 0 , RCL_ROS_TIME};
         
@@ -118,7 +119,7 @@ std::string camera_frame;
 
     cl tc;
     tf2::doTransform(*cloud, tc, tf);
-    std::vector<float> depths;
+    std::vector<geometry_msgs::msg::Point> depths;
     sensor_msgs::PointCloud2ConstIterator<float> ix(tc,"x");
     sensor_msgs::PointCloud2ConstIterator<float> iy(tc,"y");
     sensor_msgs::PointCloud2ConstIterator<float> iz(tc,"z");
@@ -126,16 +127,21 @@ std::string camera_frame;
     for (; ix != ix.end(); ++ix, ++iy, ++iz) {   
        if (!std::isfinite(*ix) || !std::isfinite(*iy) || !std::isfinite(*iz) || *ix <= 0.1f)
            continue;
-       depths.push_back(*ix);
+       geometry_msgs::msg::Point point;
+       point.x = *ix; point.y = *iy; point.z = *iz;
+       depths.push_back(point);
    }
 
     stop_line_n = depths.size();
     stop_line_valid = depths.size() >= static_cast<size_t>(stop_line_min_points);
     stop_line_stamp = rclcpp::Time(cloud->header.stamp);
     if(stop_line_valid){
-        size_t index = static_cast<size_t>(depths.size() * stop_line_percentile);
-        std::nth_element(depths.begin(), depths.begin()+index, depths.end());
-        stop_line_dist = depths[index];
+        size_t index = std::min(depths.size() - 1, static_cast<size_t>(
+            depths.size() * std::clamp(stop_line_percentile, 0.0, 1.0)));
+        std::nth_element(depths.begin(), depths.begin()+index, depths.end(),
+            [](const auto & a, const auto & b) { return a.x < b.x; });
+        stop_line_position = depths[index];
+        stop_line_dist = static_cast<float>(stop_line_position.x);
     }
     }
 
@@ -200,16 +206,18 @@ std::string camera_frame;
     for (const auto &b : detections->detections) {
         
         auto result = b;
+      
+        // This model's "sign" class represents STOP signs; it does not set is_stop_sign.
+        if(b.is_stop_sign || b.class_name == "sign" || b.class_name == "stop_sign") {
+            result.is_stop_sign = true;
+            result.class_name = "stop_sign";
 
-        // Real, fake, and unclassified sign candidates all use the painted line.
-        // Authenticity only controls whether the BT stops before the intersection.
-        if(b.is_stop_sign || b.class_name == stop_sign_class) {
             result.n_pts = stop_line_n;
             result.depth_valid = false;  
             double age = std::fabs((rclcpp::Time(detections->header.stamp) - stop_line_stamp).seconds());
           if (stop_line_valid && age <= stop_line_max_age) {
                 result.distance = stop_line_dist;
-                set_position(result, 0.5 * (b.x1 + b.x2), 0.5 * (b.y1 + b.y2), stop_line_dist);   
+                result.position = stop_line_position; // actual line point, not the roadside sign ray
                 result.depth_valid = true;
             }
             output.detections.push_back(result);  

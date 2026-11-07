@@ -12,7 +12,9 @@ find_package(rclcpp_action REQUIRED)
 find_package(behaviortree_cpp REQUIRED)
 find_package(behaviortree_ros2 REQUIRED)
 find_package(fusion_interfaces REQUIRED)
+find_package(vision_interfaces REQUIRED)
 find_package(lane_change_interfaces REQUIRED)
+find_package(stop_interfaces REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(intersection_interfaces_cpp REQUIRED)
 find_package(sensor_msgs REQUIRED)
@@ -26,7 +28,8 @@ target_include_directories(bt_executor PRIVATE
                             ${CMAKE_CURRENT_SOURCE_DIR}/include )
 ament_target_dependencies(
   bt_executor rclcpp rclcpp_action std_msgs 
-  fusion_interfaces lane_change_interfaces 
+  fusion_interfaces lane_change_interfaces
+  stop_interfaces
   behaviortree_ros2 behaviortree_cpp
   intersection_interfaces_cpp sensor_msgs vision_interfaces tf2_ros tf2_sensor_msgs tf2_geometry_msgs
 )

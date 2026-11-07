@@ -1,6 +1,7 @@
 // bt executor: subscribes to the detections, builds the tree from XML, ticks it.
 // path_bridge arbitrates lane/intersection paths and owns the Nav2 FollowPath client.
 #include <chrono>
+#include <cmath>
 #include <memory>
 #include <string>
 #include <vector>
@@ -9,6 +10,7 @@
 #include "behaviortree_ros2/ros_node_params.hpp"
 #include "fusion_interfaces/msg/tracked_obstacle_array.hpp"
 #include "bt/nodes.hpp"
+#include "vision_interfaces/msg/detection_array.hpp"
 #include "bt/shared_state.hpp"
 #include "bt/intersection_input.hpp"
 #include "rclcpp/rclcpp.hpp"
@@ -38,9 +40,11 @@ int main(int argc, char **argv)
 	const auto det_topic = node->declare_parameter<std::string>("detections_topic", "/tracked_obstacles");
 	const auto enable_topic = node->declare_parameter<std::string>("lane_follow_enable_topic", "/lane_follow/enable");
 	const auto lane_change_action = node->declare_parameter<std::string>("lane_change_action", "lane_change");
+	const auto stop_action = node->declare_parameter<std::string>("stop_action", "stop");
 	const double tick_rate = node->declare_parameter<double>("tick_rate", 20.0);
 	const double stale = node->declare_parameter<double>("stale_timeout", 1.0);
 	const double min_retry = node->declare_parameter<double>("lane_change_min_retry", 2.0);
+	const double stop_min_retry = node->declare_parameter<double>("stop_min_retry", 2.0);
 	const auto intersection_action = node->declare_parameter<std::string>("intersection_action", "intersection");
 	const double intersection_retry = node->declare_parameter<double>("intersection_min_retry", 2.0);
 	const double intersection_server_wait = node->declare_parameter<double>("intersection_server_wait_timeout", 5.0);
@@ -141,12 +145,23 @@ int main(int argc, char **argv)
 		}
 	);
 
+	// live lane perception: tells the shared state whether a pedestrian is (still) in the lane
+	auto lane_sub = node->create_subscription<vision_interfaces::msg::DetectionArray>(
+		node->declare_parameter<std::string>("lane_detections_topic", "/detections_lane"),
+		rclcpp::SensorDataQoS(), [state](vision_interfaces::msg::DetectionArray::ConstSharedPtr msg) {
+			bool occupied = false;
+			for (const auto& d : msg->detections) {
+				if (d.class_name == "pedestrian" && (!d.depth_valid || d.is_in_lane)) occupied = true;
+			}
+			state->on_lane(occupied);
+		});
+
 	auto lane_gate = node->create_publisher<std_msgs::msg::Bool>(
 		enable_topic, rclcpp::QoS(1).reliable().transient_local());
 	lane_gate->publish(std_msgs::msg::Bool{});
 	BT::BehaviorTreeFactory factory;
 	factory.registerNodeType<bt::DecideAction>("DecideAction", state);
-	factory.registerNodeType<bt::StopRobot>("StopRobot");
+	factory.registerNodeType<bt::StopRobot>("StopRobot", BT::RosNodeParams(node, stop_action), state, stop_min_retry);
 	factory.registerNodeType<bt::BeginIntersection>("BeginIntersection", state);
 	factory.registerNodeType<bt::MarkIntersectionStopped>("MarkIntersectionStopped", state);
 	factory.registerNodeType<bt::RetryOnNextTick>("RetryOnNextTick");
