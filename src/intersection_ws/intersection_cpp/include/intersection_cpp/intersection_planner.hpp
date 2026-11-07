@@ -40,12 +40,12 @@ namespace intersection {
         double fallback_distance_to_inters{1.0}; // used if the line end cant be seen (in m)
 
         // Path generation params
-        double min_turning_radius{1.5};
-        double exit_length{2.0}; // Path length after intersection
+        double min_turning_radius{0.5};
+        double exit_length{5.0}; // Path length after intersection
         double merge_length{2.0}; // Distance used to blend the robot pose to lane center
         double path_resolution{0.1}; // Spaces between path poses (in m)
 
-        double robot_radius{0.5}; // Used for clearance check (in m)
+        double robot_radius{0.3}; // Used for clearance check (in m)
     };
    
     struct PlanDebug {

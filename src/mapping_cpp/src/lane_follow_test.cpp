@@ -1,179 +1,112 @@
-/*#include <rclcpp/rclcpp.hpp>
-#include <rclcpp_action/rclcpp_action.hpp>
-#include <nav_msgs/msg/path.hpp>
-#include <nav2_msgs/action/follow_path.hpp>
-#include <std_msgs/msg/bool.hpp>
 #include <chrono>
-
-class PathBridge : public rclcpp::Node {
-public:
-using FollowPath = nav2_msgs::action::FollowPath;
-using GoalHandleFollowPath = rclcpp_action::ClientGoalHandle<FollowPath>;
-
-PathBridge() : Node("path_bridge"), min_update_period(std::chrono::milliseconds(1000))  {
-            action_client_ = rclcpp_action::create_client<FollowPath>(this, "follow_path");
-
-            last_update_time = this->now();
-            left_path_sub_ = this->create_subscription<nav_msgs::msg::Path>(
-"/path/selected_centerline", 10,
-std::bind(&PathBridge::path_cb_, this, std::placeholders::_1)
-            );
-
-RCLCPP_INFO(this->get_logger(), "Path bridge node started.");
-        }
-private:
-rclcpp_action::Client<FollowPath>::SharedPtr action_client_;
-rclcpp::Subscription<nav_msgs::msg::Path>::SharedPtr left_path_sub_;
-rclcpp::Duration min_update_period;
-rclcpp::Time last_update_time;
-
-void path_cb_(nav_msgs::msg::Path::ConstSharedPtr msg) {
-auto current_time = this->now();
-if (current_time - last_update_time < min_update_period) {
-return; 
-            }
-
-if (!action_client_->wait_for_action_server(std::chrono::milliseconds(10))) {
-return;
-            }
-
-auto goal_msg = FollowPath::Goal();
-            goal_msg.path = *msg;
-            goal_msg.controller_id = "FollowPath";
-
-auto send_goal_options = rclcpp_action::Client<FollowPath>::SendGoalOptions();
-            send_goal_options.result_callback = std::bind(&PathBridge::result_cb_, this, std::placeholders::_1);
-            action_client_->async_send_goal(goal_msg, send_goal_options);
-            last_update_time = current_time;
-        }
-
-void result_cb_(const GoalHandleFollowPath::WrappedResult & result) {
-switch (result.code) {
-case rclcpp_action::ResultCode::SUCCEEDED:
-RCLCPP_INFO(this->get_logger(), "Robot reached the final point of the tracked path.");
-break;
-case rclcpp_action::ResultCode::CANCELED:
-RCLCPP_DEBUG(this->get_logger(), "Previous path seamlessly preempted by new update.");
-break;
-case rclcpp_action::ResultCode::ABORTED:
-RCLCPP_WARN(this->get_logger(), "Path execution aborted by MPPI controller.");
-break;
-default:
-break;
-            }
-        }
-};
-
-int main(int argc, char ** argv) {
-rclcpp::init(argc, argv);
-rclcpp::spin(std::make_shared<PathBridge>());
-rclcpp::shutdown();
-return 0;
-}*/
-
+#include <cstdint>
+#include <memory>
 #include <rclcpp/rclcpp.hpp>
 #include <rclcpp_action/rclcpp_action.hpp>
 #include <nav_msgs/msg/path.hpp>
 #include <nav2_msgs/action/follow_path.hpp>
 #include <std_msgs/msg/bool.hpp>
-#include <chrono>
 
+// Owns the single Nav2 FollowPath client. Intersection paths have priority;
+// lane updates cannot replace a maneuver until its publisher clears the path.
 class PathBridge : public rclcpp::Node {
 public:
     using FollowPath = nav2_msgs::action::FollowPath;
-    using GoalHandleFollowPath = rclcpp_action::ClientGoalHandle<FollowPath>;
+    using GoalHandle = rclcpp_action::ClientGoalHandle<FollowPath>;
+    using Path = nav_msgs::msg::Path;
 
-    PathBridge() : Node("path_bridge"), min_update_period(std::chrono::milliseconds(1000)), lane_follow_enabled_(false) {
+    PathBridge() : Node("path_bridge") {
         action_client_ = rclcpp_action::create_client<FollowPath>(this, "follow_path");
-
-        last_update_time = this->now();
-        
-        // Subscribe to path updates
-        left_path_sub_ = this->create_subscription<nav_msgs::msg::Path>(
-            "/path/selected_centerline", 10,
-            std::bind(&PathBridge::path_cb_, this, std::placeholders::_1)
-        );
-
-        // Subscribe to the BT LaneFollowing enable gate
-        enable_sub_ = this->create_subscription<std_msgs::msg::Bool>(
-            "/lane_follow/enable", 10,
-            std::bind(&PathBridge::enable_cb_, this, std::placeholders::_1)
-        );
-
-        RCLCPP_INFO(this->get_logger(), "Path bridge node started and synced with BT gate.");
+        const auto lane_topic = declare_parameter<std::string>("lane_path_topic", "/path/selected_centerline");
+        const auto intersection_topic = declare_parameter<std::string>("intersection_path_topic", "/intersection_path");
+        const auto enable_topic = declare_parameter<std::string>("lane_follow_enable_topic", "/lane_follow/enable");
+        lane_max_age_ = declare_parameter<double>("lane_path_max_age", 1.0);
+        update_period_ = declare_parameter<double>("lane_update_period", 1.0);
+        lane_sub_ = create_subscription<Path>(lane_topic, 10, [this](Path::ConstSharedPtr msg) {
+            lane_path_ = msg;
+            lane_received_ = now().seconds();
+        });
+        intersection_sub_ = create_subscription<Path>(intersection_topic,
+            rclcpp::QoS(1).reliable().transient_local(), [this](Path::ConstSharedPtr msg) {
+                if (msg->poses.empty()) {
+                    if (intersection_path_) cancel_current();
+                    intersection_path_.reset();
+                } else {
+                    cancel_current();
+                    intersection_path_ = msg;
+                }
+                dispatch();
+            });
+        enable_sub_ = create_subscription<std_msgs::msg::Bool>(enable_topic,
+            rclcpp::QoS(1).reliable().transient_local(), [this](std_msgs::msg::Bool::ConstSharedPtr msg) {
+                lane_enabled_ = msg->data;
+                // A lane-disable message may arrive after the intersection path.
+                // Only cancel a lane goal here; the server owns maneuver cancellation.
+                if (!lane_enabled_ && !intersection_path_) cancel_current();
+                dispatch();
+            });
+        timer_ = create_wall_timer(std::chrono::milliseconds(50), [this] { dispatch(); });
     }
 
 private:
+    void cancel_current() {
+        ++generation_; // Invalidate pending acceptance/result callbacks as well.
+        if (active_goal_) action_client_->async_cancel_goal(active_goal_);
+        active_goal_.reset();
+        sent_path_.reset();
+        last_send_ = -1e9;
+    }
+
+    void dispatch() {
+        const double t = now().seconds();
+        Path::ConstSharedPtr desired = intersection_path_;
+        if (!desired && lane_enabled_ && t - lane_received_ <= lane_max_age_) desired = lane_path_;
+        if (!desired || desired->poses.empty() || desired == sent_path_) return;
+        // A maneuver starts immediately; its one-shot latched publication is
+        // retried by this timer if Nav2 has not started yet.
+        if (t - last_send_ < update_period_ || !action_client_->action_server_is_ready()) return;
+        FollowPath::Goal goal;
+        goal.path = *desired;
+        goal.controller_id = "FollowPath";
+        const auto generation = ++generation_;
+        sent_path_ = desired;
+        last_send_ = t;
+        rclcpp_action::Client<FollowPath>::SendGoalOptions options;
+        options.goal_response_callback = [this, generation](GoalHandle::SharedPtr handle) {
+            if (generation != generation_) {
+                if (handle) action_client_->async_cancel_goal(handle);
+                return;
+            }
+            active_goal_ = handle;
+            if (!handle) {
+                sent_path_.reset();
+                RCLCPP_WARN(get_logger(), "FollowPath goal rejected; will retry");
+            }
+        };
+        options.result_callback = [this, generation](const GoalHandle::WrappedResult& result) {
+            if (generation != generation_) return;
+            active_goal_.reset();
+            if (result.code == rclcpp_action::ResultCode::ABORTED) {
+                RCLCPP_WARN(get_logger(), "FollowPath aborted");
+                // Do not silently resume lane following during an intersection.
+            }
+        };
+        action_client_->async_send_goal(goal, options);
+    }
+
     rclcpp_action::Client<FollowPath>::SharedPtr action_client_;
-    rclcpp::Subscription<nav_msgs::msg::Path>::SharedPtr left_path_sub_;
+    rclcpp::Subscription<Path>::SharedPtr lane_sub_, intersection_sub_;
     rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr enable_sub_;
-    
-    rclcpp::Duration min_update_period;
-    rclcpp::Time last_update_time;
-    bool lane_follow_enabled_;
-    GoalHandleFollowPath::SharedPtr active_goal_handle_;
-
-    void enable_cb_(const std_msgs::msg::Bool::SharedPtr msg) {
-        lane_follow_enabled_ = msg->data;
-        if (!lane_follow_enabled_ && active_goal_handle_) {
-            // Cancel current navigation goal if lane following is disabled by BT (e.g., during Lane Change)
-            action_client_->async_cancel_goal(active_goal_handle_);
-            active_goal_handle_.reset();
-            RCLCPP_INFO(this->get_logger(), "Lane following disabled by BT; canceling active path execution.");
-        }
-    }
-
-    void path_cb_(nav_msgs::msg::Path::ConstSharedPtr msg) {
-        // If the behavior tree has disabled lane following, ignore incoming paths
-        if (!lane_follow_enabled_) {
-            return;
-        }
-
-        auto current_time = this->now();
-        if (current_time - last_update_time < min_update_period) {
-            return; 
-        }
-
-        if (!action_client_->wait_for_action_server(std::chrono::milliseconds(100))) {
-            RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 5000, "FollowPath action server not available.");
-            return;
-        }
-
-        auto goal_msg = FollowPath::Goal();
-        goal_msg.path = *msg;
-        goal_msg.controller_id = "FollowPath";
-
-        auto send_goal_options = rclcpp_action::Client<FollowPath>::SendGoalOptions();
-        send_goal_options.result_callback = std::bind(&PathBridge::result_cb_, this, std::placeholders::_1);
-        
-        send_goal_options.goal_response_callback = 
-            [this](typename rclcpp_action::Client<FollowPath>::GoalResponseCallback::argument_type goal_handle) {
-                active_goal_handle_ = goal_handle;
-            };
-
-        action_client_->async_send_goal(goal_msg, send_goal_options);
-        last_update_time = current_time;
-    }
-
-    void result_cb_(const GoalHandleFollowPath::WrappedResult & result) {
-        active_goal_handle_.reset();
-        switch (result.code) {
-            case rclcpp_action::ResultCode::SUCCEEDED:
-                RCLCPP_INFO(this->get_logger(), "Robot reached the final point of the tracked path.");
-                break;
-            case rclcpp_action::ResultCode::CANCELED:
-                RCLCPP_DEBUG(this->get_logger(), "Previous path seamlessly preempted by new update or BT halt.");
-                break;
-            case rclcpp_action::ResultCode::ABORTED:
-                RCLCPP_WARN(this->get_logger(), "Path execution aborted by MPPI controller.");
-                break;
-            default:
-                break;
-        }
-    }
+    rclcpp::TimerBase::SharedPtr timer_;
+    Path::ConstSharedPtr lane_path_, intersection_path_, sent_path_;
+    GoalHandle::SharedPtr active_goal_;
+    bool lane_enabled_ = false;
+    double lane_received_ = -1e9, last_send_ = -1e9;
+    double lane_max_age_, update_period_;
+    uint64_t generation_ = 0;
 };
 
-int main(int argc, char ** argv) {
+int main(int argc, char** argv) {
     rclcpp::init(argc, argv);
     rclcpp::spin(std::make_shared<PathBridge>());
     rclcpp::shutdown();
