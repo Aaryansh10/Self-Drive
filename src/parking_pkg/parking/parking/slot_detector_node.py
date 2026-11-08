@@ -38,7 +38,7 @@ from visualization_msgs.msg import Marker, MarkerArray
 
 from parking.slot_core import (Params, SlotTracker, VoxelMap, extract_segments,
                                apply_grid_update, drain_pending, find_slots, grid_to_points, merge_duplicates,
-                               parse_xy, split_at_junctions, to_odom)
+                               parse_xy, snap_corners, split_at_junctions, to_odom)
 
 
 def yaw_from_quat(q):
@@ -265,8 +265,8 @@ class SlotDetector(Node):
             pts = pts[self.rng.choice(len(pts), cap, replace=False)]
         t0 = time.monotonic()
         segs = extract_segments(pts, self.p)
-        self.segs = split_at_junctions(merge_duplicates(segs, self.p), self.p)
-        dets = find_slots(segs, self.p, ref_xy=self.robot_xy)
+        self.segs = split_at_junctions(snap_corners(merge_duplicates(segs, self.p), self.p), self.p)
+        dets = find_slots(segs, self.p, ref_xy=self.robot_xy, pts=pts)
         tracks = self.tracker.update(dets)
         self.det_ms = (time.monotonic() - t0) * 1000.0
         self.publish(tracks, pts, self.get_clock().now().to_msg())

@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 import numpy as np
 
 
-#  params
+# ----------------------------------------------------------------- params
 @dataclass
 class Params:
     voxel: float = 0.05            # map / downsample resolution [m]
@@ -23,20 +23,26 @@ class Params:
     ransac_tol: float = 0.05       # inlier distance to a line [m]
     min_seg_len: float = 0.8       # shortest line segment kept [m]
     gap_max: float = 0.45          # split a line at gaps larger than this [m]
+    merge_gap: float = 1.0         # collinear pieces closer than this are joined into one line [m]
     max_lines: int = 40
     corner_tol: float = 0.40       # back-end <-> side-end distance [m]
     parallel_tol_deg: float = 10.0
     perp_tol_deg: float = 12.0
-    width_range: tuple = (1.8, 6.0)    # slot width  (back-line length) [m]
+    width_range: tuple = (1.8, 6.5)    # slot width  (back-line length) [m]
     depth_min: float = 1.5             # min visible side length [m]
     width_mismatch: float = 0.5        # |back length - side separation| [m]
     dup_offset: float = 0.18           # parallel lines closer than this are merged (ghost copies) [m]
+    mouth_inset: float = 0.9           # ignore this much at each end of the entrance (side lines live there) [m]
+    mouth_tol: float = 0.6             # band around the entrance line that is checked for paint [m]
+    mouth_closed_frac: float = 0.35    # >this fraction of the entrance covered by paint => closed box, not a slot
+    interior_clutter_frac: float = 0.10  # >this fraction of the interior occupied => halve the score
+    corner_snap: float = 1.5           # extend line ends to a neighbouring perpendicular line within this gap [m]
     side_len_max: float = 9.0          # longer lines are road/lane edges, not slot sides
     partial_reject_ref_inside: bool = True   # robot between the two sides => it is a lane (False for pull-out)
     seed: int = 0
 
 
-#  helpers
+# ---------------------------------------------------------------- helpers
 def wrap(a):
     return (a + np.pi) % (2 * np.pi) - np.pi
 
@@ -86,7 +92,7 @@ class Slot:
         return local @ R.T + self.center
 
 
-# voxel point map
+# ------------------------------------------------------ voxel point map
 class VoxelMap:
     """Static line map in the odom frame; accumulates detections over time."""
 
@@ -116,7 +122,7 @@ class VoxelMap:
         return (k + 0.5) * self.v if len(k) else np.zeros((0, 2))
 
 
-#  line extraction
+# ------------------------------------------------------ line extraction
 def extract_segments(pts, p: Params):
     rng = np.random.default_rng(p.seed)
     segs = []
@@ -171,7 +177,7 @@ def extract_segments(pts, p: Params):
     return segs
 
 
-#  U detection
+# ----------------------------------------------------------- U detection
 def _end_near(seg, pt, tol):
     """Return (end_point, far_point) of seg whose end is within tol of pt, else None."""
     d0 = np.linalg.norm(seg.p0 - pt)
@@ -201,7 +207,7 @@ def merge_duplicates(segs, p: Params):
                     continue
                 ta = sorted([(a.p0 - o) @ u, (a.p1 - o) @ u])
                 tb = sorted([(b.p0 - o) @ u, (b.p1 - o) @ u])
-                if max(ta[0], tb[0]) - min(ta[1], tb[1]) > p.gap_max:      # far apart along the line
+                if max(ta[0], tb[0]) - min(ta[1], tb[1]) > p.merge_gap:    # far apart along the line
                     continue
                 wa, wb = a.n_pts, b.n_pts
                 off = (wa * da + wb * db) / (wa + wb)
@@ -212,6 +218,34 @@ def merge_duplicates(segs, p: Params):
                 break
             if changed:
                 break
+    return segs
+
+
+def snap_corners(segs, p: Params):
+    """Thinning rounds corners, so fitted straight lines stop short of them. Extend each end
+    to the intersection with a near-perpendicular line if that is within p.corner_snap."""
+    segs = [Segment(s.p0.copy(), s.p1.copy(), s.n_pts) for s in segs]
+    g = p.corner_snap
+    for i, a in enumerate(segs):
+        for j, b in enumerate(segs):
+            if i == j or line_angle_diff(a.angle, b.angle) < np.deg2rad(60):
+                continue
+            ua, ub = a.unit, b.unit
+            den = ua[0] * ub[1] - ua[1] * ub[0]
+            if abs(den) < 1e-6:
+                continue
+            d = b.p0 - a.p0
+            ta = (d[0] * ub[1] - d[1] * ub[0]) / den          # a.p0 + ta*ua = intersection
+            tb = (d[0] * ua[1] - d[1] * ua[0]) / den
+            P = a.p0 + ta * ua
+            La, Lb = a.length, b.length
+            # b must actually be there: P inside b (T-junction) or within g of one of its ends (corner)
+            if not (-g <= tb <= Lb + g):
+                continue
+            if ta < 0 and -ta <= g:                            # extend a's p0 end back to P
+                segs[i] = a = Segment(P, a.p1, a.n_pts)
+            elif ta > La and ta - La <= g:                     # extend a's p1 end forward to P
+                segs[i] = a = Segment(a.p0, P, a.n_pts)
     return segs
 
 
@@ -246,10 +280,37 @@ def split_at_junctions(segs, p: Params):
     return out
 
 
-def find_slots(segs, p: Params, ref_xy=None):
+def mouth_open(slot, pts, p: Params):
+    """(is_open, clutter) - a real slot has NO paint across its entrance; a closed box has a line there.
+    clutter = fraction of the slot interior that is occupied (other lines inside)."""
+    if pts is None or len(pts) == 0:
+        return True, 0.0
+    c, s = np.cos(slot.yaw), np.sin(slot.yaw)
+    R = np.array([[c, -s], [s, c]])
+    q = (pts - slot.center) @ R                  # local: x into the slot, y lateral
+    hw = slot.width / 2.0
+    y0 = hw - p.mouth_inset
+    if y0 > 0.3:
+        band = q[(np.abs(q[:, 0]) < p.mouth_tol) & (np.abs(q[:, 1]) < y0)]
+        nb = max(int(2 * y0 / 0.25), 1)
+        occ = len(np.unique(np.floor((band[:, 1] + y0) / 0.25).astype(int))) if len(band) else 0
+        if occ / nb > p.mouth_closed_frac:
+            return False, 0.0
+    ins = 0.8
+    inner = q[(q[:, 0] > p.mouth_tol + 0.3) & (q[:, 0] < slot.depth - ins) & (np.abs(q[:, 1]) < hw - ins)]
+    clutter = 0.0
+    if len(inner):
+        nx = max(int((slot.depth - ins - p.mouth_tol - 0.3) / 0.3), 1)
+        ny = max(int(2 * (hw - ins) / 0.3), 1)
+        cells = len(np.unique(np.floor(inner / 0.3).astype(int), axis=0))
+        clutter = cells / (nx * ny)
+    return True, clutter
+
+
+def find_slots(segs, p: Params, ref_xy=None, pts=None):
     """U-shaped slots (back + 2 sides). If ref_xy (e.g. robot position) is given, also returns
     partial slots made of two parallel sides when the back line is not (yet) visible."""
-    segs = split_at_junctions(merge_duplicates(segs, p), p)
+    segs = split_at_junctions(snap_corners(merge_duplicates(segs, p), p), p)
     out, used = [], set()
     ptol = np.deg2rad(p.parallel_tol_deg)
     qtol = np.deg2rad(p.perp_tol_deg)
@@ -301,14 +362,19 @@ def find_slots(segs, p: Params, ref_xy=None):
             slot = Slot(center=center, yaw=yaw, width=0.5 * (sep + W), depth=depth,
                         score=score, back_seen=True)
             slot.corners = slot.polygon()
+            is_open, clutter = mouth_open(slot, pts, p)
+            if not is_open:
+                continue                          # closed box (line across the mouth): not a slot
+            if clutter > p.interior_clutter_frac:
+                slot.score *= 0.5
             out.append(slot)
             used.update((i0, i1))
     if ref_xy is not None:
-        out += _partial_slots(segs, used, p, np.asarray(ref_xy, float))
+        out += _partial_slots(segs, used, p, np.asarray(ref_xy, float), pts)
     return _dedupe(out)
 
 
-def _partial_slots(segs, used, p, ref):
+def _partial_slots(segs, used, p, ref, pts=None):
     """Two parallel sides with a plausible gap, no other side in between, back unseen."""
     res = []
     ptol = np.deg2rad(p.parallel_tol_deg)
@@ -358,6 +424,8 @@ def _partial_slots(segs, used, p, ref):
             slot = Slot(center=ent, yaw=yaw, width=sep, depth=hi - lo,
                         score=0.45 * min(1.0, 0.5 + (hi - lo) / 4.0), back_seen=False)
             slot.corners = slot.polygon()
+            if not mouth_open(slot, pts, p)[0]:
+                continue
             res.append(slot)
     return res
 
@@ -378,7 +446,7 @@ def _dedupe(slots):
     return kept
 
 
-#  tracking
+# --------------------------------------------------------------- tracking
 @dataclass
 class Track:
     id: int
@@ -439,7 +507,7 @@ class SlotTracker:
             t.locked = (t.id == track_id)
 
 
-#  ROS-side helpers
+# ------------------------------------------------------- ROS-side helpers
 def parse_xy(data: bytes, point_step: int, n_points: int, offsets=(0, 4)):
     """x, y (float32) from a PointCloud2 buffer without sensor_msgs_py."""
     raw = np.frombuffer(data, dtype=np.uint8, count=n_points * point_step).reshape(n_points, point_step)
@@ -454,7 +522,7 @@ def to_odom(xy, tx, ty, yaw):
     return xy @ np.array([[c, s], [-s, c]]) + np.array([tx, ty])
 
 
-#  non-blocking TF queue
+# ------------------------------------------------- non-blocking TF queue
 def drain_pending(pending, lookup, ingest, now, max_wait=0.5, max_len=25):
     """Process queued clouds in order without ever blocking.
 
@@ -480,7 +548,7 @@ def drain_pending(pending, lookup, ingest, now, max_wait=0.5, max_len=25):
     return done, dropped
 
 
-#  occupancy-grid (/map) input
+# ------------------------------------------- occupancy-grid (/map) input
 def thin_binary(img, max_iter=60):
     """Zhang-Suen thinning (vectorised numpy): thick inflated line bands -> 1-cell centrelines."""
     img = img.astype(np.uint8).copy()
@@ -506,6 +574,18 @@ def thin_binary(img, max_iter=60):
     return img.astype(bool)
 
 
+def close_holes(occ, iters=1):
+    """Binary closing (3x3 dilate then erode): fills pinholes so thinning does not break lines."""
+    x = occ.copy()
+    for _ in range(iters):
+        P = np.pad(x, 1)
+        x = np.maximum.reduce([P[i:i + x.shape[0], j:j + x.shape[1]] for i in range(3) for j in range(3)])
+    for _ in range(iters):
+        P = np.pad(x, 1, constant_values=True)
+        x = np.minimum.reduce([P[i:i + x.shape[0], j:j + x.shape[1]] for i in range(3) for j in range(3)])
+    return x
+
+
 def grid_to_points(data, width, height, res, ox, oy, oyaw, center_xy, radius,
                    occ_thresh=65, thin=True):
     """nav_msgs/OccupancyGrid -> Nx2 world points (cell centres of occupied cells, thinned).
@@ -524,7 +604,7 @@ def grid_to_points(data, width, height, res, ox, oy, oyaw, center_xy, radius,
         return np.zeros((0, 2))
     occ = arr[i0:i1, j0:j1] >= occ_thresh
     if thin and occ.any():
-        occ = thin_binary(occ)
+        occ = thin_binary(close_holes(occ, 2))
     ii, jj = np.nonzero(occ)
     gx, gy = (jj + j0 + 0.5) * res, (ii + i0 + 0.5) * res
     return np.stack([c * gx - s * gy + ox, s * gx + c * gy + oy], 1)

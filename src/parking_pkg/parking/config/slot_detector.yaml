@@ -17,10 +17,11 @@ slot_detector:
     min_voxel_hits: 4         # a map cell must be seen in >= this many frames
     nominal_depth: 0.0        # set to the real slot depth (m) to draw partial slots full-size
     
-    width_range: [1.8, 6.1]   # slot width (back-line length) [m]
+    width_range: [1.8, 6.2]   # slot width (back-line length) [m]
     depth_min: 1.5            # shortest visible side [m]
     side_len_max: 9.0
     partial_reject_ref_inside: true   #  false for PULL-OUT (robot starts inside the slot)
     corner_snap: 1.5          # m; repairs corners shortened by thinning thick map lines
     merge_gap: 1.0            # m; join collinear line pieces separated by small gaps
+    mouth_closed_frac: 0.35   # slot rejected if mouth is closed more than this fraction of width
 
