@@ -15,7 +15,6 @@
 #include "vision_cpp/gpu_pipeline.hpp"
 #include "vision_cpp/ipm.hpp"
 #include "vision_cpp/model_helpers.hpp"
-#include "vision_cpp/thinning.hpp"
 #include "vision_cpp/trt_engine.hpp"
 
 namespace vision_cpp {
@@ -66,7 +65,6 @@ class VisionNode : public rclcpp::Node {
   sensor_msgs::msg::PointCloud2 pc_white_, pc_yellow_, pc_stop_;
   vision_interfaces::msg::DetectionArray det_msg_;
   DetScratch det_scratch_;
-  SkelScratch skel_scratch_w_, skel_scratch_y_;
   std::vector<Detection> dets_;
   std::vector<int> vw_, uw_, vy_, uy_, vs_, us_;
   std::vector<float> pts_;

@@ -143,14 +143,14 @@ class HydraNetRecorder : public rclcpp::Node {
     std::memcpy(h_src_.get(), msg->data.data(), static_cast<size_t>(stride) * h);
 
     const cudaStream_t s = stream_;
-    VCUDA(cudaMemsetAsync(d_res_.get(), 0, 4 * sizeof(int), s));
+    VCUDA(cudaMemsetAsync(d_res_.get(), 0, sizeof(int), s));
     VCUDA(cudaMemcpyAsync(d_src_.get(), h_src_.get(), static_cast<size_t>(stride) * h, cudaMemcpyHostToDevice, s));
     launch_preprocess(d_src_.get(), w, h, stride, ch, bgr, engine_->input_ptr(), engine_->input_half(), in_w_, in_h_, mean_, std_, s);
     if (!engine_->enqueue(s)) { RCLCPP_ERROR(get_logger(), "TensorRT enqueue failed"); return; }
     launch_det_candidates(engine_->cls(), engine_->ctr(), engine_->boxes(), engine_->n_anchors(), engine_->n_classes(), thr_, d_res_.get(), s);
     launch_overlay(d_src_.get(), w, h, stride, ch, bgr, engine_->lane(), engine_->lane_c(), engine_->lane_h(), engine_->lane_w(), alpha_, d_out_.get(), s);
     VCUDA(cudaMemcpyAsync(h_out_.get(), d_out_.get(), static_cast<size_t>(w) * h * 3, cudaMemcpyDeviceToHost, s));
-    VCUDA(cudaMemcpyAsync(h_res_.get(), d_res_.get(), offsetof(FrameResults, skel), cudaMemcpyDeviceToHost, s));  // counters + candidates only
+    VCUDA(cudaMemcpyAsync(h_res_.get(), d_res_.get(), offsetof(FrameResults, stop_v), cudaMemcpyDeviceToHost, s));  // counters + candidates only
     VCUDA(cudaStreamSynchronize(s));
 
     select_detections(*h_res_.get(), nms_iou_, max_dets_, static_cast<float>(w) / in_w_, static_cast<float>(h) / in_h_, w, h, -1.f, scratch_, dets_);

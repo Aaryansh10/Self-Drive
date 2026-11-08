@@ -66,8 +66,6 @@ VisionNode::VisionNode() : rclcpp::Node("vision") {
   declare_parameter("close_k", 5);
   declare_parameter("min_area", 150);
   declare_parameter("min_perimeter", 50);
-  declare_parameter("thin_row_start", 160);
-  declare_parameter("thin_max_iter", 64);
   declare_parameter("cuda_graph", true);
 
   declare_parameter("spin_wait", true);        // busy-wait on the GPU: lowest latency, burns one core
@@ -78,7 +76,7 @@ VisionNode::VisionNode() : rclcpp::Node("vision") {
 
   auto P = [this](const char* n) { return get_parameter(n); };
   ground_frame_ = P("ground_frame").as_string();
-  step_ = static_cast<int>(P("subsample_step").as_int());
+  step_ = std::max(1, static_cast<int>(P("subsample_step").as_int()));
   cam_pitch_ = P("cam_pitch").as_double();
   cam_height_ = P("cam_height").as_double();
   max_range_ = P("max_range").as_double();
@@ -124,12 +122,10 @@ VisionNode::VisionNode() : rclcpp::Node("vision") {
   pc.in_w = in_w_;
   pc.in_h = in_h_;
   pc.subsample_step = step_;
-  pc.thin_row_start = static_cast<int>(P("thin_row_start").as_int());
   pc.open_k = static_cast<int>(P("open_k").as_int());
   pc.close_k = static_cast<int>(P("close_k").as_int());
   pc.min_area = static_cast<int>(P("min_area").as_int());
   pc.min_perimeter = static_cast<int>(P("min_perimeter").as_int());
-  pc.thin_max_iter = static_cast<int>(P("thin_max_iter").as_int());
   pc.score_thresh = static_cast<float>(P("score_thresh").as_double());
   pc.use_graph = P("cuda_graph").as_bool();
   const auto mean = P("mean").as_double_array(), stdv = P("std").as_double_array();
@@ -141,13 +137,14 @@ VisionNode::VisionNode() : rclcpp::Node("vision") {
   pipe_->set_source(in_w_, in_h_, in_w_ * 3, 3, true);  // warm everything for the expected format
 
   // ---- persistent messages / scratch ------------------------------------------------------------
+  const size_t max_pixels = static_cast<size_t>(in_w_) * in_h_;
   for (auto* m : {&pc_white_, &pc_yellow_, &pc_stop_}) {
     init_cloud(*m);
-    m->data.reserve(12 * static_cast<size_t>(std::max(kMaxSkel, kMaxCols)));
+    m->data.reserve(12 * std::max(max_pixels, static_cast<size_t>(kMaxCols)));
   }
-  pts_.assign(3 * static_cast<size_t>(std::max(kMaxSkel, kMaxCols)), 0.f);
+  pts_.assign(3 * std::max(max_pixels, static_cast<size_t>(kMaxCols)), 0.f);
   det_msg_.detections.reserve(static_cast<size_t>(max_dets_));
-  for (auto* v : {&vw_, &uw_, &vy_, &uy_}) v->reserve(kMaxSkel);
+  for (auto* v : {&vw_, &uw_, &vy_, &uy_}) v->reserve(max_pixels);
   for (auto* v : {&vs_, &us_}) v->reserve(kMaxCols);
   dets_.reserve(static_cast<size_t>(max_dets_) + 8);
   det_scratch_.idx.reserve(kMaxCand);
@@ -253,15 +250,21 @@ void VisionNode::img_cb(sensor_msgs::msg::Image::ConstSharedPtr msg) {
 
   // ---- CPU tail: sort / NMS / IPM ---------------------------------------------------------------
   const FrameResults& r = pipe_->results();
-  const int r0 = pipe_->thin_r0(), rows = pipe_->thin_rows();
 
   select_detections(r, nms_iou_, max_dets_, 1.f, 1.f, in_w_, in_h_, 2.f, det_scratch_, dets_);
 
-  const int nw = std::min(r.skel_count[0], kMaxSkel), ny = std::min(r.skel_count[1], kMaxSkel);
-  if (r.skel_count[0] > kMaxSkel || r.skel_count[1] > kMaxSkel)
-    RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 5000, "skeleton pixel list overflow (raise kMaxSkel)");
-  order_skeleton_pixels(r.skel[0], nw, r0, rows, skel_scratch_w_, vw_, uw_);
-  order_skeleton_pixels(r.skel[1], ny, r0, rows, skel_scratch_y_, vy_, uy_);
+  // Publish every cleaned lane pixel (optionally subsampled), with no thinning or
+  // fixed-capacity compaction that could truncate dense lane markings.
+  vw_.clear(); uw_.clear(); vy_.clear(); uy_.clear();
+  const auto* masks = pipe_->cleaned_masks();
+  const size_t hw = static_cast<size_t>(in_w_) * in_h_;
+  for (int v = 0; v < in_h_; v += step_) {
+    for (int u = 0; u < in_w_; u += step_) {
+      const size_t i = static_cast<size_t>(v) * in_w_ + u;
+      if (masks[i]) { vw_.push_back(v / step_); uw_.push_back(u / step_); }
+      if (masks[hw + i]) { vy_.push_back(v / step_); uy_.push_back(u / step_); }
+    }
+  }
 
   vs_.clear();
   us_.clear();

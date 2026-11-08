@@ -48,6 +48,12 @@ def generate_launch_description():
 
     return LaunchDescription([
         declare_use_sim_time_cmd,
+        Node(package='mapping_cpp', executable='mapping_node', output='screen',
+             parameters=[{'use_sim_time': use_sim_time}]),
+        Node(package='mapping_cpp', executable='map_skeleton_node', output='screen',
+             parameters=[{'use_sim_time': use_sim_time}]),
+        Node(package='path_generation_cpp', executable='centerline_node', output='screen',
+             parameters=[{'use_sim_time': use_sim_time}]),
         controller_server_node,
         lifecycle_manager_node,
         velocity_smoother_node

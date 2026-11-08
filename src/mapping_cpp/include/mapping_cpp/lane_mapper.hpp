@@ -67,7 +67,7 @@ namespace lane_mapper {
 
             void insert(const std::vector<Point2>& pts, const Pose2& pose, int frame_hp = -1);
             /*
-                Takes the leading edge points of the white lane lines, and the pose at that snapshot
+                Takes the cleaned points of one lane class, and the pose at that snapshot
                 and then splashes them onto the map using log-odds.
 
                 frame_hp: The number of points used to determine if the frame is to be considered missed.

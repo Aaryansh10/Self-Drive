@@ -13,30 +13,18 @@ GpuPipeline::GpuPipeline(const PipelineConfig& cfg, TrtEngine& engine, TrtEngine
   cfg_.subsample_step = std::max(1, cfg_.subsample_step);
   cfg_.open_k |= (cfg_.open_k > 1);    // force odd kernel sizes
   cfg_.close_k |= (cfg_.close_k > 1);
-  cfg_.thin_max_iter = std::min(std::max(2, cfg_.thin_max_iter), kThinMaxIter);
 
   const int s = cfg_.subsample_step;
-  const int Hs = (cfg_.in_h + s - 1) / s, Ws = (cfg_.in_w + s - 1) / s;
+  const int Ws = (cfg_.in_w + s - 1) / s;
   if (Ws > kMaxCols) throw std::runtime_error("image too wide for kMaxCols");
-  geom_.W = cfg_.in_w;
-  geom_.H = cfg_.in_h;
-  geom_.step = s;
-  geom_.r0 = std::min(std::max(0, (cfg_.thin_row_start + s - 1) / s), Hs - 1);
-  geom_.Wt = Ws;
-  geom_.Ht = Hs - geom_.r0;
   cols_ = Ws;
 
   const size_t hw = static_cast<size_t>(cfg_.in_w) * cfg_.in_h;
-  const size_t tp = static_cast<size_t>(geom_.Wt) * geom_.Ht;
   planes_a_.alloc(3 * hw);
   planes_b_.alloc(3 * hw);
   cc_parent_.alloc(3 * hw);
   cc_stats_.alloc(3 * hw);
-  thin0_.alloc(2 * tp);
-  thin1_.alloc(2 * tp);
-  thin_counters_.alloc(kThinMaxIter);
-  skel_parent_.alloc(2 * tp);
-  skel_stats_.alloc(2 * tp);
+  h_masks_.alloc(2 * hw);
   d_res_.alloc(1);
   h_res_.alloc(1);
 
@@ -94,8 +82,7 @@ void GpuPipeline::enqueue_all(cudaStream_t s) {
   const int W = cfg_.in_w, H = cfg_.in_h;
   const size_t hw = static_cast<size_t>(W) * H;
 
-  VCUDA(cudaMemsetAsync(d_res_.get(), 0, 4 * sizeof(int), s));  // the 4 counters
-  VCUDA(cudaMemsetAsync(thin_counters_.get(), 0, kThinMaxIter * sizeof(int), s));
+  VCUDA(cudaMemsetAsync(d_res_.get(), 0, sizeof(int), s));  // detection count
   VCUDA(cudaMemcpyAsync(d_src_.get(), h_src_.get(), src_bytes_, cudaMemcpyHostToDevice, s));
 
   // --- model --------------------------------------------------------------------------------
@@ -117,14 +104,7 @@ void GpuPipeline::enqueue_all(cudaStream_t s) {
 
   launch_leading_edge(planes_b_.get() + 2 * hw, W, H, cfg_.subsample_step, cols_, d_res_.get(), s);
 
-  // --- thinning of white + yellow, skeleton labelling / compaction --------------------------
-  launch_thin_init(planes_b_.get(), geom_, thin0_.get(), s);
-  launch_thin_iterations(thin0_.get(), thin1_.get(), geom_.Wt, geom_.Ht, thin_counters_.get(),
-                         cfg_.thin_max_iter, s);
-  launch_thin_corners(thin0_.get(), thin1_.get(), geom_.Wt, geom_.Ht, s);
-  launch_cc(thin0_.get(), geom_.Wt, geom_.Ht, 2, skel_parent_.get(), skel_stats_.get(), false, s);
-  launch_skel_compact(thin0_.get(), skel_parent_.get(), skel_stats_.get(), geom_, cfg_.skel_min_len,
-                      d_res_.get(), s);
+  VCUDA(cudaMemcpyAsync(h_masks_.get(), planes_b_.get(), 2 * hw, cudaMemcpyDeviceToHost, s));
 
   VCUDA(cudaMemcpyAsync(h_res_.get(), d_res_.get(), sizeof(FrameResults), cudaMemcpyDeviceToHost, s));
   VCUDA(cudaGetLastError());
