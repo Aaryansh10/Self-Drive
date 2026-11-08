@@ -185,9 +185,18 @@ class CenterlineNode : public rclcpp::Node {
                                        yaw(tf.transform.rotation)};
       if (!map_frame_.empty() && map_frame_ != white->header.frame_id) tracker_->reset();
       map_frame_ = white->header.frame_id;
-      res = tracker_->update(toPoints(*white, robot, generator_params_.max_range, max_lateral_range_),
-                             toPoints(*yellow, robot, generator_params_.max_range, max_lateral_range_),
-                             robot, rclcpp::Time(header.stamp).seconds(), selected_lane_);
+      const auto white_points = toPoints(*white, robot, generator_params_.max_range, max_lateral_range_);
+      const auto yellow_points = toPoints(*yellow, robot, generator_params_.max_range, max_lateral_range_);
+      res = tracker_->update(white_points, yellow_points, robot,
+                             rclcpp::Time(header.stamp).seconds(), selected_lane_);
+      if ((selected_lane_ == 2 ? res.left : res.right).empty()) {
+        RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 5000,
+            "Selected centerline is empty: %zu white and %zu yellow skeleton points in planning area, selected lane %s. %s",
+            white_points.size(), yellow_points.size(), selected_lane_ == 2 ? "left" : "right",
+            white_points.empty() && yellow_points.empty() ?
+              "Check vision, map occupancy, TF, and skeleton topics." :
+              "No suitable current-road branches; check lane selection and road geometry parameters.");
+      }
     } catch (const std::exception& e) {
       RCLCPP_ERROR_THROTTLE(get_logger(), *get_clock(), 2000, "Map centerline generation failed: %s", e.what());
     }

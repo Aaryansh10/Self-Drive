@@ -70,6 +70,7 @@ def generate_launch_description():
         executable='controller_server',
         name='controller_server',
         output='screen',
+        remappings=[('cmd_vel', 'cmd_vel_nav')],
         parameters=[nav2_params_file, {'use_sim_time': use_sim_time}]
     )
 
@@ -86,6 +87,7 @@ def generate_launch_description():
         executable='velocity_smoother',
         name='velocity_smoother',
         output='screen',
+        remappings=[('cmd_vel', 'cmd_vel_nav'), ('cmd_vel_smoothed', 'cmd_vel')],
         parameters=[nav2_params_file, {'use_sim_time': use_sim_time}],
     )
 
@@ -170,7 +172,7 @@ def generate_launch_description():
     bt = Node(
         package='bt',
         executable='bt_executor',
-        name='bt_executor',
+        name='bt',
         output='screen',
         parameters=[
             os.path.join(bt_dir, 'config', 'bt.yaml'),
