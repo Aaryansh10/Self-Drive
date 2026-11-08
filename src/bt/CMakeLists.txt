@@ -59,7 +59,7 @@ if(BUILD_TESTING)
   add_executable(test_intersection test/test_intersection.cpp)
   target_include_directories(test_intersection PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
   ament_target_dependencies(test_intersection rclcpp rclcpp_action std_msgs
-    lane_change_interfaces intersection_interfaces_cpp behaviortree_cpp behaviortree_ros2)
+    lane_change_interfaces intersection_interfaces_cpp behaviortree_cpp behaviortree_ros2 stop_interfaces)
   target_link_libraries(test_intersection behaviortree_ros2::behaviortree_ros2)
   target_compile_definitions(test_intersection PRIVATE TEST_TREE="${CMAKE_CURRENT_SOURCE_DIR}/trees/main.xml")
   add_test(NAME test_intersection COMMAND test_intersection)
