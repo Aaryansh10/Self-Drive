@@ -1,0 +1,20 @@
+# ---- Goal ----
+float32 hold_time          # legacy request; server uses lane clearance for pedestrians, 2 s for stop signs at their corresponding lines
+string target_class        # pedestrian | stop_sign
+float32 obstacle_distance # for stop_sign: forward distance to its corresponding stop line
+---
+# ---- Result ----
+bool success
+string message
+string class_name          # class the stop was performed for
+float32 final_distance     # gap to the obstacle at standstill (m), -1 if no obstacle_distance was given
+float32 stopping_distance  # distance travelled between brake start and standstill (m)
+float32 trigger_speed      # speed when braking started (m/s)
+---
+# ---- Feedback ----
+string state               # MONITORING | BRAKING | STOPPED
+string class_name
+float32 distance           # estimated gap to the obstacle (m), -1 if unknown
+float32 trigger_distance   # distance at which braking starts for the current speed (m)
+float32 speed              # measured speed (m/s)
+float32 cmd_speed          # speed currently commanded by this server (m/s)

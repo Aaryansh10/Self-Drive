@@ -26,6 +26,7 @@ def generate_launch_description():
         package='nav2_controller',
         executable='controller_server',
         name='controller_server',
+        remappings=[('cmd_vel', '/cmd_vel_nav')],
         output='screen',
         parameters=[nav2_params_file, {'use_sim_time': use_sim_time}]
     )
@@ -42,6 +43,7 @@ def generate_launch_description():
         package='nav2_velocity_smoother',
         executable='velocity_smoother',
         name='velocity_smoother',
+        remappings=[('cmd_vel', '/cmd_vel_nav'), ('cmd_vel_smoothed', '/cmd_vel_drive')],
         output='screen',
         parameters=[nav2_params_file, {'use_sim_time': use_sim_time}],
     )

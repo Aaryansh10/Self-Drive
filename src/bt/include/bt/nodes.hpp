@@ -18,12 +18,83 @@
 #include "behaviortree_ros2/bt_action_node.hpp"
 #include "bt/shared_state.hpp"
 #include "lane_change_interfaces/action/lane_change.hpp"
+#include "stop_interfaces/action/stop.hpp"
 #include "rclcpp/rclcpp.hpp"
 #include "std_msgs/msg/bool.hpp"
 #include "intersection_interfaces_cpp/action/intersection.hpp"
 
-namespace bt
-{
+namespace bt {
+
+// send stop goal ... for an obstacle STOP, if success the obstacle is marked handled, so the same obstacle can't trigger again.
+// Also used for the intersection stop line (decision = INTERSECTION with needs_stop); there the
+// MarkIntersectionStopped node (not this node) records that the stop is done.
+class StopRobot : public BT::RosActionNode<stop_interfaces::action::Stop> {
+ public:
+  using StopAction = stop_interfaces::action::Stop;
+
+  StopRobot(const std::string& name, const BT::NodeConfig& conf, const BT::RosNodeParams& params,
+            std::shared_ptr<SharedState> state, double min_retry_s)
+      : RosActionNode<StopAction>(name, conf, params),
+        state_(std::move(state)),
+        min_retry_(min_retry_s) {}
+
+  static BT::PortsList providedPorts() {
+    return providedBasicPorts({
+        BT::InputPort<int>("obstacle_id", -1, "obstacle that triggered this stop"),
+        BT::InputPort<double>("distance", 0.0, "Distance to stop target; intersection stops use the stop line")
+    });
+  }
+
+  // Called once when the node starts. Sends a goal for an active STOP decision, or for an active
+  // INTERSECTION decision that still needs a stop, and not while a recent FAILURE is still in its
+  // retry lockout. (A success never blocks the next, different obstacle.)
+  bool setGoal(Goal& goal) override {
+    if (state_->now() - last_fail_ < min_retry_) return false;
+    Decision d = state_->current();
+    if (d.action != Action::STOP) {
+      d = state_->active_intersection();  // intersection stop-line case
+      if (d.action != Action::INTERSECTION || !d.needs_stop) return false;
+    }
+    sent_ = d;  // remember exactly which obstacle this goal is for
+
+    goal.hold_time = d.cls == "pedestrian" ? 0.0F : 2.0F;
+    goal.target_class = d.cls;
+    goal.obstacle_distance = std::isfinite(d.distance) ? static_cast<float>(d.distance) : 0.0F;
+    return true;
+  }
+
+  BT::NodeStatus onResultReceived(const WrappedResult& wr) override {
+    if (wr.result && wr.result->success) {
+      // handled only after the server confirmed success; an intersection stop must stay active for IntersectionTurn
+      if (sent_.action != Action::INTERSECTION) state_->mark_handled(sent_);
+      RCLCPP_INFO(logger(),
+                  "stop done for obstacle %ld (%s): %s (final_dist=%.2f m, stop_dist=%.2f m, trig_speed=%.2f m/s)",
+                  sent_.obstacle_id, sent_.cls.c_str(), wr.result->message.c_str(), wr.result->final_distance,
+                  wr.result->stopping_distance, wr.result->trigger_speed);
+      return BT::NodeStatus::SUCCESS;
+    }
+    last_fail_ = state_->now();
+    RCLCPP_WARN(logger(), "stop failed for obstacle %ld (%s): %s", sent_.obstacle_id, sent_.cls.c_str(),
+                (wr.result ? wr.result->message.c_str() : "no result"));
+    return BT::NodeStatus::FAILURE;
+  }
+
+  BT::NodeStatus onFailure(BT::ActionNodeErrorCode error) override {
+    if (error == BT::INVALID_GOAL) return BT::NodeStatus::FAILURE;  // lockout / no active obstacle: expected, quiet
+    last_fail_ = state_->now();
+    RCLCPP_WARN(logger(), "StopRobot: %s (retry in %.1f s)", BT::toStr(error), min_retry_);
+    return BT::NodeStatus::FAILURE;
+  }
+
+  // halt(): the wrapper cancels the goal for us; nothing was marked handled, so the obstacle can still trigger.
+  void onHalt() override { RCLCPP_DEBUG(logger(), "StopRobot halted"); }
+
+ private:
+  std::shared_ptr<SharedState> state_;
+  double min_retry_;
+  double last_fail_ = -1e9;
+  Decision sent_;
+};
 
 	// reads the latest decision and writes it on the blackboard  , decision = none  or change or stop.
 	class DecideAction : public BT::SyncActionNode
@@ -128,29 +199,6 @@ namespace bt
     private:
         rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr pub_;
     };
-
-	// Placeholder: returning FAILURE keeps the lane gate closed. Replace with
-    // the stop action client; only SUCCESS permits the intersection goal.
-	class StopRobot : public BT::SyncActionNode
-	{
-	public:
-		StopRobot(const std::string &name, const BT::NodeConfig &config) : BT::SyncActionNode(name, config) {}
-		static BT::PortsList providedPorts() { return {BT::InputPort<double>("distance", 0.0, "Distance to stop target; intersection stops use the stop line")}; }
-
-		BT::NodeStatus tick() override
-		{
-			const auto t = std::chrono::steady_clock::now();
-			if (t - last_log_ > std::chrono::seconds(2))
-			{
-				RCLCPP_WARN(rclcpp::get_logger("bt"), "STOP requested but no stop action server found (placeholder)");
-				last_log_ = t;
-			}
-			return BT::NodeStatus::FAILURE;
-		}
-
-	private:
-		std::chrono::steady_clock::time_point last_log_{};
-	};
 
 	// Default behaviour: tells path_bridge lane following is enabled while this node runs, disabled when it is halted.
 	// (Needs the enable gate in path_bridge; without it the messages are simply ignored.)
