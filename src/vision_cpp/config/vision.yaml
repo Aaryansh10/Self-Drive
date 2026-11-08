@@ -11,7 +11,6 @@ vision:
     cam_pitch: 0.4
     cam_height: 1.606
     max_range: 8.0
-    thin_row_start: 160    # re-derive if cam_pitch / cam_height / max_range / intrinsics change
     score_thresh: 0.35
     nms_iou: 0.5
     max_detections: 50

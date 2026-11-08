@@ -19,6 +19,8 @@ namespace centerline {
 struct Point2 {
   double x{0.0};
   double y{0.0};
+  int segment = 0;  // explicit map branch identity; legacy ordered inputs use 0
+  int boundary_side = 0;  // -1 right, +1 left, 0 infer for legacy inputs
 };
 
 // An empty Path means "no centerline for this side" (Python returned None).
@@ -116,7 +118,7 @@ class CenterlineGenerator {
   void updateMemory(const Vec& y, const std::vector<int>& bins, const std::vector<char>& pt_is_left);
 
   // lane splitting / labelling
-  LineSplit splitLines(const Vec& x, const Vec& y) const;
+  LineSplit splitLines(const Vec& x, const Vec& y, const std::vector<int>& segments) const;
   int distBin(double x) const;
   std::vector<char> labelLines(const Vec& y, const LineSplit& ls, const std::vector<int>& bins) const;
 

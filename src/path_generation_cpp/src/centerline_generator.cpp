@@ -228,11 +228,11 @@ void CenterlineGenerator::updateMemory(const Vec& y, const std::vector<int>& bin
 // Line splitting / labelling
 // ---------------------------------------------------------------------------------------------
 
-CenterlineGenerator::LineSplit CenterlineGenerator::splitLines(const Vec& x, const Vec& y) const {
+CenterlineGenerator::LineSplit CenterlineGenerator::splitLines(const Vec& x, const Vec& y, const std::vector<int>& segments) const {
   LineSplit ls;
   ls.line_id.resize(x.size());
   for (std::size_t i = 0; i < x.size(); ++i) {
-    if (i == 0 || std::hypot(x[i] - x[i - 1], y[i] - y[i - 1]) > p_.max_gap) {
+    if (i == 0 || segments[i] != segments[i - 1] || std::hypot(x[i] - x[i - 1], y[i] - y[i - 1]) > p_.max_gap) {
       ls.start.push_back(static_cast<int>(i));
       ls.count.push_back(0);
     }
@@ -331,7 +331,10 @@ void CenterlineGenerator::lineCenterline(Vec x, Vec y, const std::array<OffsetSp
                                          std::vector<Candidate>& out) {
   if (x.size() < 3) return;
 
-  if (std::hypot(x.front(), y.front()) > std::hypot(x.back(), y.back())) {
+  // Lane offsets assume the tangent points forward. Radial distance can
+  // decrease along a forward bend, so it cannot determine tangent direction.
+  if (x.front() > x.back() ||
+      (x.front() == x.back() && std::hypot(x.front(), y.front()) > std::hypot(x.back(), y.back()))) {
     std::reverse(x.begin(), x.end());
     std::reverse(y.begin(), y.end());
   }
@@ -433,15 +436,17 @@ void CenterlineGenerator::yellowCandidates(const std::vector<Point2>& yellow,
   const std::vector<char> keep = yellowGate(x, y);
 
   Vec gx, gy;
+  std::vector<int> segments;
   for (std::size_t i = 0; i < x.size(); ++i) {
     if (keep[i]) {
+      segments.push_back(yellow[i].segment);
       gx.push_back(x[i]);
       gy.push_back(y[i]);
     }
   }
   if (gx.size() < 3) return;
 
-  const LineSplit ls = splitLines(gx, gy);
+  const LineSplit ls = splitLines(gx, gy, segments);
   for (std::size_t l = 0; l < ls.start.size(); ++l) {
     const auto s = static_cast<std::ptrdiff_t>(ls.start[l]);
     const auto c = static_cast<std::ptrdiff_t>(ls.count[l]);
@@ -800,15 +805,22 @@ Result CenterlineGenerator::generate(const std::vector<Point2>& white,
   if (!white.empty()) {
     const std::size_t n = white.size();
     Vec x(n), y(n);
-    std::vector<int> bins(n);
+    std::vector<int> bins(n), segments(n);
     for (std::size_t i = 0; i < n; ++i) {
+      segments[i] = white[i].segment;
       x[i] = white[i].x;
       y[i] = white[i].y;
       bins[i] = distBin(x[i]);
     }
 
-    const LineSplit ls = splitLines(x, y);
-    const std::vector<char> line_is_left = labelLines(y, ls, bins);
+    const LineSplit ls = splitLines(x, y, segments);
+    std::vector<char> line_is_left = labelLines(y, ls, bins);
+    // Map association knows which road edge each branch represents, even when
+    // both edges lie on the same side of the vehicle after an intersection.
+    for (std::size_t l = 0; l < ls.start.size(); ++l) {
+      const int side = white[static_cast<std::size_t>(ls.start[l])].boundary_side;
+      if (side != 0) line_is_left[l] = side > 0;
+    }
     std::vector<char> pt_is_left(n);
     for (std::size_t i = 0; i < n; ++i) pt_is_left[i] = line_is_left[static_cast<std::size_t>(ls.line_id[i])];
     updateMemory(y, bins, pt_is_left);

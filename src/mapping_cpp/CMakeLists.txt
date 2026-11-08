@@ -19,11 +19,20 @@ find_package(message_filters REQUIRED)
 find_package(tf2_ros REQUIRED)
 
 if(BUILD_TESTING)
+  add_executable(test_lane_maps test/test_lane_maps.cpp src/lane_mapper.cpp)
+  target_include_directories(test_lane_maps PRIVATE include)
+  target_compile_features(test_lane_maps PRIVATE cxx_std_17)
+  add_test(NAME lane_maps COMMAND test_lane_maps)
   find_package(ament_lint_auto REQUIRED)
   set(ament_cmake_copyright_FOUND TRUE)
   set(ament_cmake_cpplint_FOUND TRUE)
   ament_lint_auto_find_test_dependencies()
 endif()
+
+add_executable(map_skeleton_node src/map_skeleton_node.cpp)
+target_include_directories(map_skeleton_node PRIVATE include)
+target_compile_features(map_skeleton_node PUBLIC cxx_std_17)
+ament_target_dependencies(map_skeleton_node rclcpp nav_msgs)
 
 add_executable(path_bridge src/lane_follow_test.cpp)
 add_executable(mapping_node
@@ -59,6 +68,7 @@ ament_target_dependencies(path_bridge
 install(TARGETS
   path_bridge
   mapping_node
+  map_skeleton_node
   DESTINATION lib/${PROJECT_NAME}
 )
 

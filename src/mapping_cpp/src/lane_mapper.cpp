@@ -165,8 +165,8 @@ namespace lane_mapper {
         }
         const int grid_x_0 = std::max(toGridNumber(min_x), origin_x_);
         const int grid_y_0 = std::max(toGridNumber(min_y), origin_y_);
-        const int grid_x_1 = std::min(toGridNumber(max_x), width_ - 1);
-        const int grid_y_1 = std::min(toGridNumber(max_y), height_ - 1);
+        const int grid_x_1 = std::min(toGridNumber(max_x), origin_x_ + width_ - 1);
+        const int grid_y_1 = std::min(toGridNumber(max_y), origin_y_ + height_ - 1);
         const float x_span = parameters_.roi_x_max - parameters_.roi_x_min;
 
         // ROI pass
@@ -174,8 +174,8 @@ namespace lane_mapper {
             for (int grid_x = grid_x_0; grid_x <= grid_x_1; ++grid_x) {
                 const double dx = (grid_x + 0.5) * parameters_.resolution - pose.x;
                 const double dy = (grid_y + 0.5) * parameters_.resolution - pose.y;
-                const float robot_x = float(cos_yaw * dx - sin_yaw * dy); // robot frame forward distance
-                const float robot_y = float(-sin_yaw * dx + sin_yaw * dy); // robot frame lateral left distance
+                const float robot_x = float(cos_yaw * dx + sin_yaw * dy); // robot frame forward distance
+                const float robot_y = float(-sin_yaw * dx + cos_yaw * dy); // robot frame lateral left distance
                 if (robot_x < parameters_.roi_x_min || robot_x > parameters_.roi_x_max)
                     continue;
                 
@@ -249,12 +249,12 @@ namespace lane_mapper {
                 int count = 0;
                 for (
                     int dy = std::max(0, y - parameters_.speckle_radius); 
-                    dy < std::min(height_ - 1, y + parameters_.speckle_radius);
+                    dy <= std::min(height_ - 1, y + parameters_.speckle_radius);
                     ++dy
                 ) {
                     for (
                         int dx = std::max(0, x - parameters_.speckle_radius);
-                        dx < std::min(width_ - 1, x + parameters_.speckle_radius);
+                        dx <= std::min(width_ - 1, x + parameters_.speckle_radius);
                         ++dx
                     ) {
                         count += occupied[size_t(dy) * width_ + dx];

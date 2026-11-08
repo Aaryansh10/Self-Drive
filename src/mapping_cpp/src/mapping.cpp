@@ -5,6 +5,7 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <stdexcept>
 #include <vector>
 
 #include <message_filters/synchronizer.h>
@@ -20,7 +21,7 @@
 #include "lane_mapper.hpp"
 
 using PC2 = sensor_msgs::msg::PointCloud2;
-using SyncPolicy = message_filters::sync_policies::ExactTime<PC2, PC2, PC2>;
+using SyncPolicy = message_filters::sync_policies::ExactTime<PC2, PC2>;
 
 class MappingNode : public rclcpp::Node {
     public:
@@ -28,8 +29,8 @@ class MappingNode : public rclcpp::Node {
             // Topics / frames
             const auto white_topic = declare_parameter<std::string>("white_topic", "/pc_whitelane");
             const auto yellow_topic = declare_parameter<std::string>("yellow_topic", "/pc_yellowlane");
-            const auto stop_topic = declare_parameter<std::string>("stop_topic", "/pc_stopline");
-            const auto map_topic = declare_parameter<std::string>("map_topic", "/lane_map/white");
+            const auto map_topic = declare_parameter<std::string>("white_map_topic", "/lane_map/white");
+            const auto yellow_map_topic = declare_parameter<std::string>("yellow_map_topic", "/lane_map/yellow");
             odom_frame_ = declare_parameter<std::string>("odom_frame", "odom");
             base_frame_ = declare_parameter<std::string>("base_frame", "link_base");
             publish_every_ = std::max<int>(1, declare_parameter<int>("publish_every", 3));
@@ -66,7 +67,11 @@ class MappingNode : public rclcpp::Node {
             p.speckle_support = declare_parameter<int>("speckle_support", 3);
             roi_x_min_ = p.roi_x_min;
             roi_x_max_ = p.roi_x_max;
-            grid_ = std::make_unique<lane_mapper::LaneMapper>(p);
+            if (p.resolution <= 0 || p.width <= 0 || p.height <= 0 ||
+                p.roi_x_max <= p.roi_x_min || p.range_ref <= 0 || p.sigma_base <= 0)
+                throw std::invalid_argument("Invalid lane map geometry or evidence parameters");
+            white_grid_ = std::make_unique<lane_mapper::LaneMapper>(p);
+            yellow_grid_ = std::make_unique<lane_mapper::LaneMapper>(p);
 
             // TF (the listener spins its own thread, so the buffer fills independently of our executor)
             tf_buffer_ = std::make_unique<tf2_ros::Buffer>(get_clock());
@@ -75,11 +80,10 @@ class MappingNode : public rclcpp::Node {
             // Sync clouds
             sub_w_.subscribe(this, white_topic, rmw_qos_profile_sensor_data);
             sub_y_.subscribe(this, yellow_topic, rmw_qos_profile_sensor_data);
-            sub_s_.subscribe(this, stop_topic, rmw_qos_profile_sensor_data);
-            sync_ = std::make_shared<message_filters::Synchronizer<SyncPolicy>>(SyncPolicy(10), sub_w_, sub_y_, sub_s_);
+            sync_ = std::make_shared<message_filters::Synchronizer<SyncPolicy>>(SyncPolicy(10), sub_w_, sub_y_);
             sync_->registerCallback(
                 std::bind(&MappingNode::cb, this, std::placeholders::_1,
-                std::placeholders::_2, std::placeholders::_3)
+                std::placeholders::_2)
             );
 
             // Retries pending clouds once TF catches up, even if no new cloud arrives
@@ -87,13 +91,14 @@ class MappingNode : public rclcpp::Node {
                 std::chrono::milliseconds(std::max<int>(1, tf_poll_ms_)),
                 std::bind(&MappingNode::drain, this));
 
-            map_pub_ = create_publisher<nav_msgs::msg::OccupancyGrid>(map_topic, rclcpp::QoS(1).reliable());
+            map_pub_ = create_publisher<nav_msgs::msg::OccupancyGrid>(map_topic, rclcpp::QoS(1).reliable().transient_local());
+            yellow_map_pub_ = create_publisher<nav_msgs::msg::OccupancyGrid>(yellow_map_topic, rclcpp::QoS(1).reliable().transient_local());
             RCLCPP_INFO(get_logger(), "Mapping node started.");
         }
 
     private:
         struct Pending {
-            PC2::ConstSharedPtr white, yellow, stop;
+            PC2::ConstSharedPtr white, yellow;
         };
 
         std::string odom_frame_, base_frame_;
@@ -106,7 +111,7 @@ class MappingNode : public rclcpp::Node {
         double roi_x_min_ = 0.0;
         double roi_x_max_ = 0.0;
 
-        std::unique_ptr<lane_mapper::LaneMapper> grid_;
+        std::unique_ptr<lane_mapper::LaneMapper> white_grid_, yellow_grid_;
         std::vector<int8_t> buf_;
         lane_mapper::Window win_{};
 
@@ -116,13 +121,18 @@ class MappingNode : public rclcpp::Node {
 
         std::unique_ptr<tf2_ros::Buffer> tf_buffer_;
         std::unique_ptr<tf2_ros::TransformListener> tf_listener_;
-        message_filters::Subscriber<PC2> sub_w_, sub_y_, sub_s_;
+        message_filters::Subscriber<PC2> sub_w_, sub_y_;
         std::shared_ptr<message_filters::Synchronizer<SyncPolicy>> sync_;
         rclcpp::TimerBase::SharedPtr drain_timer_;
-        rclcpp::Publisher<nav_msgs::msg::OccupancyGrid>::SharedPtr map_pub_;
+        rclcpp::Publisher<nav_msgs::msg::OccupancyGrid>::SharedPtr map_pub_, yellow_map_pub_;
 
-        void cb(const PC2::ConstSharedPtr& white, const PC2::ConstSharedPtr& yellow, const PC2::ConstSharedPtr& stopline) {
-            pending_.push_back({white, yellow, stopline});
+        void cb(const PC2::ConstSharedPtr& white, const PC2::ConstSharedPtr& yellow) {
+            if (white->header.frame_id != base_frame_ || yellow->header.frame_id != base_frame_) {
+                RCLCPP_ERROR_THROTTLE(get_logger(), *get_clock(), 2000,
+                    "Lane clouds must be in configured base_frame '%s'", base_frame_.c_str());
+                return;
+            }
+            pending_.push_back({white, yellow});
             while (pending_.size() > max_pending_) {
                 RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
                     "Pending queue full (%zu), dropping oldest cloud (TF too slow?)", max_pending_);
@@ -180,40 +190,43 @@ class MappingNode : public rclcpp::Node {
         void process(const Pending& p, const geometry_msgs::msg::TransformStamped& tf) {
             const auto& white = p.white;
             const auto& yellow = p.yellow;
-            const auto& stopline = p.stop;
 
             const auto& t = tf.transform.translation;
             const auto& q = tf.transform.rotation;
             const double yaw = std::atan2(2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z));
             const lane_mapper::Pose2 pose{t.x, t.y, yaw};
 
-            // Taking the white lane points inside the trusted range band
-            std::vector<lane_mapper::Point2> pts;
-            const size_t n = size_t(white->width) * white->height;
-            pts.reserve(n);
-            sensor_msgs::PointCloud2ConstIterator<float> ix(*white, "x"), iy(*white, "y");
-            for (size_t i = 0; i < n; ++i, ++ix, ++iy) {
-                const float x = *ix;
-                const float y = *iy;
-                if (!std::isfinite(x) || !std::isfinite(y))
-                    continue;
-                if (x > roi_x_max_ || x < roi_x_min_)
-                    continue;
-                pts.push_back({x, y});
-            }
-
-            // Sensor reliability check
-            const int health = int(n + size_t(yellow->width) * yellow->height + size_t(stopline->width) * stopline->height);
-
-            grid_->insert(pts, pose, health);
+            auto points = [this](const PC2& cloud) {
+                std::vector<lane_mapper::Point2> pts;
+                const size_t n = size_t(cloud.width) * cloud.height;
+                if (n == 0 || cloud.data.empty()) return pts;
+                pts.reserve(n);
+                sensor_msgs::PointCloud2ConstIterator<float> ix(cloud, "x"), iy(cloud, "y");
+                for (size_t i = 0; i < n; ++i, ++ix, ++iy) {
+                    if (std::isfinite(*ix) && std::isfinite(*iy) &&
+                        *ix >= roi_x_min_ && *ix <= roi_x_max_) pts.push_back({*ix, *iy});
+                }
+                return pts;
+            };
+            const auto white_pts = points(*white), yellow_pts = points(*yellow);
+            const int health = static_cast<int>(white_pts.size() + yellow_pts.size());
+            white_grid_->insert(white_pts, pose, health);
+            yellow_grid_->insert(yellow_pts, pose, health);
 
             if (++frame_ % publish_every_ != 0)
                 return;
 
-            grid_->snapshot(buf_, win_);
+            publishMap(*white_grid_, map_pub_, white->header.stamp);
+            publishMap(*yellow_grid_, yellow_map_pub_, white->header.stamp);
+        }
+
+        void publishMap(const lane_mapper::LaneMapper& grid,
+                        const rclcpp::Publisher<nav_msgs::msg::OccupancyGrid>::SharedPtr& pub,
+                        const builtin_interfaces::msg::Time& stamp) {
+            grid.snapshot(buf_, win_);
 
             nav_msgs::msg::OccupancyGrid msg;
-            msg.header.stamp = white->header.stamp;
+            msg.header.stamp = stamp;
             msg.header.frame_id = odom_frame_;
             msg.info.resolution = float(win_.resolution);
             msg.info.width = uint32_t(win_.width);
@@ -222,7 +235,7 @@ class MappingNode : public rclcpp::Node {
             msg.info.origin.position.y = win_.origin_y;
             msg.info.origin.orientation.w = 1.0;
             msg.data = buf_;
-            map_pub_->publish(msg);
+            pub->publish(msg);
         }
 };
 

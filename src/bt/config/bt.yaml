@@ -25,15 +25,20 @@ bt:
     sign_detections_topic: /detections_depth
     stop_sign_class: sign
     sign_real_threshold: 0.5
-    stop_line_topic: /pc_stopline  # fallback only when no recent sign detection exists
-    stop_line_min_points: 5
+    stop_line_topic: /pc_stopline  # required geometric confirmation for all intersection triggers
+    stop_line_min_points: 10
     stop_line_half_width: 1.2
+    stop_line_min_span: 0.6       # m lateral extent of connected line points
+    stop_line_line_tolerance: 0.15 # m residual to a transverse line
+    stop_line_max_slope: 0.5      # max |dx/dy|
+    stop_line_max_gap: 0.35       # m maximum gap between adjacent supporting points
+    stop_line_sign_distance_tolerance: 1.5 # m maximum sign/cloud depth disagreement
     intersection_input_max_age: 0.5
     intersection_tf_tolerance: 0.1 # max timestamp skew for a fallback world-position anchor; 0 disables
     intersection_min_retry: 2.0
     intersection_server_wait_timeout: 5.0 # seconds for initial DDS action-server discovery
     intersection_action: intersection
-    intersection_turns: ["straight"]
+    intersection_turns: ["straight", "right", "straight"]
     road_width: 7.4               # In m
     confirm_intersection: 3
     intersection_hold: 20.0

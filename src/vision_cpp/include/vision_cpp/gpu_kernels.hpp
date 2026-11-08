@@ -43,30 +43,6 @@ void launch_cc_filter(const uint8_t* mask, const int* parent, const int2* stats,
 void launch_leading_edge(const uint8_t* mask, int W, int H, int step, int cols, FrameResults* res,
                          cudaStream_t s);
 
-// ---- thinning.py ----------------------------------------------------------------------------------
-struct ThinGeom {
-  int W, H;      // full mask size
-  int step;      // sub-sampling step
-  int r0;        // first thinned row (sub-sampled coordinates)
-  int Wt, Ht;    // thinned window size (sub-sampled)
-};
-
-// Copies rows >= r0 of planes 0 and 1 (sub-sampled by `step`) into buf0 (2 planes of Wt*Ht).
-void launch_thin_init(const uint8_t* planes, const ThinGeom& g, uint8_t* buf0, cudaStream_t s);
-
-// Fused two-sub-step Zhang-Suen iterations with device-side early exit (see gpu_kernels.cu).
-// counters must hold max_iter zeroed ints. Final image ends up in buf0 (buf1 is scratch).
-void launch_thin_iterations(uint8_t* buf0, uint8_t* buf1, int Wt, int Ht, int* counters,
-                            int max_iter, cudaStream_t s);
-
-// Removes leftover staircase corner pixels (2 passes x 4 orientations). Result in buf0.
-void launch_thin_corners(uint8_t* buf0, uint8_t* buf1, int Wt, int Ht, cudaStream_t s);
-
-// Labels skeleton components, drops those with < min_len pixels and compacts the rest into
-// res->skel[plane] (row coordinates are offset by r0 back to full-mask rows).
-void launch_skel_compact(const uint8_t* skel, const int* parent, const int2* stats,
-                         const ThinGeom& g, int min_len, FrameResults* res, cudaStream_t s);
-
 // ---- model_output.py: overlay ---------------------------------------------------------------------
 // Writes a tightly-packed BGR frame with translucent class colours (classes 1/2/3 = red/green/blue).
 void launch_overlay(const uint8_t* src, int fw, int fh, int stride, int channels, bool bgr,

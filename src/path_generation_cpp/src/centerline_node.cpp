@@ -1,17 +1,10 @@
-// Centerline node: subscribes to the lane point clouds published by the vision node and publishes the
-// left/right lane centerline paths. Replaces the CenterlineGenerator + xy_to_path part of vision.py.
-//
-//   in : /pc_whitelane   sensor_msgs/PointCloud2  (ordered leading/skeleton points, ground frame)
-//        /pc_yellowlane  sensor_msgs/PointCloud2
-//   out: /path/left_centerline, /path/right_centerline   nav_msgs/Path
-//
-// The vision node publishes both clouds with the same header stamp, so they are paired by stamp.
-
+// Generate robot-frame paths from synchronized accumulated skeleton maps.
 #include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <exception>
+#include <functional>
 #include <memory>
 #include <string>
 #include <utility>
@@ -20,31 +13,35 @@
 #include "geometry_msgs/msg/pose_stamped.hpp"
 #include "nav_msgs/msg/path.hpp"
 #include "rclcpp/rclcpp.hpp"
-#include "sensor_msgs/msg/point_cloud2.hpp"
-#include "sensor_msgs/point_cloud2_iterator.hpp"
+#include "nav_msgs/msg/occupancy_grid.hpp"
+#include <message_filters/subscriber.h>
+#include <message_filters/synchronizer.h>
+#include <message_filters/sync_policies/exact_time.h>
+#include <tf2_ros/buffer.h>
+#include <tf2_ros/transform_listener.h>
+#include "path_generation_cpp/skeleton_map.hpp"
+#include "path_generation_cpp/road_tracker.hpp"
+#include "std_msgs/msg/int32.hpp"
 
 #include "path_generation_cpp/centerline_generator.hpp"
 
 using nav_msgs::msg::Path;
-using sensor_msgs::msg::PointCloud2;
+using Grid = nav_msgs::msg::OccupancyGrid;
+using SyncPolicy = message_filters::sync_policies::ExactTime<Grid, Grid>;
 
 namespace {
 
-std::vector<centerline::Point2> toPoints(const PointCloud2::ConstSharedPtr& msg) {
-  std::vector<centerline::Point2> pts;
-  if (!msg) return pts;
-  const std::size_t n = static_cast<std::size_t>(msg->width) * msg->height;
-  if (n == 0 || msg->data.empty()) return pts;  // the iterator dereferences data.front()
+double yaw(const geometry_msgs::msg::Quaternion& q) {
+  return std::atan2(2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z));
+}
 
-  pts.reserve(n);
-  sensor_msgs::PointCloud2ConstIterator<float> ix(*msg, "x");
-  sensor_msgs::PointCloud2ConstIterator<float> iy(*msg, "y");
-  for (std::size_t i = 0; i < n; ++i, ++ix, ++iy) {
-    const double x = *ix;
-    const double y = *iy;
-    if (std::isfinite(x) && std::isfinite(y)) pts.push_back({x, y});
-  }
-  return pts;
+std::vector<centerline::Point2> toPoints(const Grid& grid, const centerline::RobotPose& robot,
+                                       double max_x, double max_y) {
+  const auto& info = grid.info;
+  return centerline::skeletonMapPoints(grid.data,
+      {static_cast<int>(info.width), static_cast<int>(info.height), info.resolution,
+       info.origin.position.x, info.origin.position.y, yaw(info.origin.orientation)},
+      robot, max_x, max_y);
 }
 
 Path toPathMsg(const centerline::Path& pts, const std_msgs::msg::Header& header) {
@@ -68,20 +65,48 @@ Path toPathMsg(const centerline::Path& pts, const std_msgs::msg::Header& header)
 class CenterlineNode : public rclcpp::Node {
  public:
   CenterlineNode() : rclcpp::Node("centerline") {
-    const auto white_topic = declare_parameter<std::string>("pc_whitelane_topic", "/pc_whitelane");
-    const auto yellow_topic = declare_parameter<std::string>("pc_yellowlane_topic", "/pc_yellowlane");
+    const auto white_topic = declare_parameter<std::string>("white_skeleton_topic", "/lane_map/white_skeleton");
+    const auto yellow_topic = declare_parameter<std::string>("yellow_skeleton_topic", "/lane_map/yellow_skeleton");
     const auto left_topic = declare_parameter<std::string>("left_centerline_topic", "/path/left_centerline");
     const auto right_topic = declare_parameter<std::string>("right_centerline_topic", "/path/right_centerline");
     timing_log_period_ = static_cast<int>(declare_parameter<int64_t>("timing_log_period", 0));
 
-    gen_ = std::make_unique<centerline::CenterlineGenerator>(declareGeneratorParams());
+    generator_params_ = declareGeneratorParams();
+    centerline::RoadTrackerParams tracker_params;
+    tracker_params.boundary_tolerance = declare_parameter<double>("road_boundary_tolerance", tracker_params.boundary_tolerance);
+    tracker_params.tolerance_per_m = declare_parameter<double>("road_tolerance_per_m", tracker_params.tolerance_per_m);
+    tracker_params.min_forward_span = declare_parameter<double>("road_min_forward_span", tracker_params.min_forward_span);
+    tracker_params.min_forward_alignment = declare_parameter<double>("road_min_forward_alignment", tracker_params.min_forward_alignment);
+    tracker_params.max_branch_heading_error = declare_parameter<double>("road_max_branch_heading_error", tracker_params.max_branch_heading_error);
+    tracker_params.reference_timeout = declare_parameter<double>("road_reference_timeout", tracker_params.reference_timeout);
+    tracker_params.reference_max_distance = declare_parameter<double>("road_reference_max_distance", tracker_params.reference_max_distance);
+    tracker_params.reference_max_heading_change = declare_parameter<double>("road_reference_max_heading_change", tracker_params.reference_max_heading_change);
+    tracker_params.fallback_timeout = declare_parameter<double>("path_fallback_timeout", tracker_params.fallback_timeout);
+    tracker_params.fallback_max_distance = declare_parameter<double>("path_fallback_max_distance", tracker_params.fallback_max_distance);
+    tracker_params.fallback_max_heading_change = declare_parameter<double>("path_fallback_max_heading_change", tracker_params.fallback_max_heading_change);
+    tracker_params.fallback_max_anchor_distance = declare_parameter<double>("path_fallback_max_anchor_distance", tracker_params.fallback_max_anchor_distance);
+    tracker_ = std::make_unique<centerline::RoadTracker>(generator_params_, tracker_params);
+    const auto initial_lane = declare_parameter<std::string>("initial_lane", "left");
+    if (initial_lane != "left" && initial_lane != "right") throw std::invalid_argument("initial_lane must be left or right");
+    selected_lane_ = initial_lane == "left" ? 2 : 1;
+    const auto selected_topic = declare_parameter<std::string>("selected_lane_topic", "/lane_change/selected_lane");
+    lane_sub_ = create_subscription<std_msgs::msg::Int32>(selected_topic, rclcpp::QoS(1).reliable().transient_local(),
+        [this](const std_msgs::msg::Int32& msg) { if (msg.data == 1 || msg.data == 2) selected_lane_ = msg.data; });
 
-    white_sub_ = create_subscription<PointCloud2>(
-        white_topic, rclcpp::SensorDataQoS(),
-        [this](PointCloud2::ConstSharedPtr msg) { onWhite(std::move(msg)); });
-    yellow_sub_ = create_subscription<PointCloud2>(
-        yellow_topic, rclcpp::SensorDataQoS(),
-        [this](PointCloud2::ConstSharedPtr msg) { onYellow(std::move(msg)); });
+    base_frame_ = declare_parameter<std::string>("base_frame", "link_base");
+    max_lateral_range_ = declare_parameter<double>("max_lateral_range", 12.0);
+    max_map_tf_skew_ = declare_parameter<double>("max_map_tf_skew", 1.0);
+    if (max_map_tf_skew_ <= 0 || !std::isfinite(max_map_tf_skew_))
+      throw std::invalid_argument("max_map_tf_skew must be positive and finite");
+    if (max_lateral_range_ <= 0) throw std::invalid_argument("max_lateral_range must be positive");
+    tf_buffer_ = std::make_unique<tf2_ros::Buffer>(get_clock());
+    tf_listener_ = std::make_unique<tf2_ros::TransformListener>(*tf_buffer_);
+    const auto qos = rclcpp::QoS(5).reliable().transient_local().get_rmw_qos_profile();
+    white_sub_.subscribe(this, white_topic, qos);
+    yellow_sub_.subscribe(this, yellow_topic, qos);
+    sync_ = std::make_shared<message_filters::Synchronizer<SyncPolicy>>(SyncPolicy(10), white_sub_, yellow_sub_);
+    sync_->registerCallback(std::bind(&CenterlineNode::process, this,
+                                     std::placeholders::_1, std::placeholders::_2));
 
     rclcpp::QoS path_qos(rclcpp::KeepLast(1));
     path_qos.reliable();
@@ -134,53 +159,41 @@ class CenterlineNode : public rclcpp::Node {
     return p;
   }
 
-  // The clouds arrive on two topics; pair them by header stamp. Callbacks run on one thread
-  // (default single-threaded executor), so no locking is needed.
-  void onWhite(PointCloud2::ConstSharedPtr msg) {
-    // A previous white cloud that never got its yellow partner (yellow dropped): process it alone
-    // rather than silently losing the frame.
-    if (white_ && !sameStamp(white_, msg)) {
-      process(white_, nullptr);
-      white_.reset();
-    }
-    white_ = std::move(msg);
-    trySync();
-  }
-
-  void onYellow(PointCloud2::ConstSharedPtr msg) {
-    yellow_ = std::move(msg);
-    trySync();
-  }
-
-  void trySync() {
-    if (!white_ || !yellow_) return;
-    if (sameStamp(white_, yellow_)) {
-      process(white_, yellow_);
-      white_.reset();
-      yellow_.reset();
-    } else if (rclcpp::Time(yellow_->header.stamp) < rclcpp::Time(white_->header.stamp)) {
-      yellow_.reset();  // stale yellow whose white partner was lost
-    }
-    // else: yellow is newer than white -> white is stale; it is flushed by the next onWhite().
-  }
-
-  static bool sameStamp(const PointCloud2::ConstSharedPtr& a, const PointCloud2::ConstSharedPtr& b) {
-    return a->header.stamp.sec == b->header.stamp.sec && a->header.stamp.nanosec == b->header.stamp.nanosec;
-  }
-
-  void process(const PointCloud2::ConstSharedPtr& white, const PointCloud2::ConstSharedPtr& yellow) {
+  void process(const Grid::ConstSharedPtr& white, const Grid::ConstSharedPtr& yellow) {
     const auto t0 = std::chrono::steady_clock::now();
 
     centerline::Result res;
+    std_msgs::msg::Header header = white->header;
+    header.frame_id = base_frame_;
     try {
-      res = gen_->generate(toPoints(white), toPoints(yellow));
+      if (white->header.frame_id.empty() || white->header.frame_id != yellow->header.frame_id)
+        throw std::runtime_error("Skeleton maps must share a nonempty frame");
+      // A rolling map is already in the odom frame: use the latest robot pose
+      // to plan from where the robot is now. A transient-local map can predate
+      // this node's TF buffer, so its acquisition-time TF may no longer exist.
+      const auto tf = tf_buffer_->lookupTransform(white->header.frame_id, base_frame_,
+          tf2::TimePointZero, tf2::durationFromSec(0.1));
+      const rclcpp::Time tf_stamp(tf.header.stamp);
+      const rclcpp::Time map_stamp(white->header.stamp);
+      if (tf_stamp.nanoseconds() != 0) {
+        const double skew = (tf_stamp - map_stamp).seconds();
+        if (std::abs(skew) > max_map_tf_skew_)
+          throw std::runtime_error("Latest TF and lane map timestamps differ by " + std::to_string(skew) + " s");
+        header.stamp = tf.header.stamp;
+      }
+      const centerline::RobotPose robot{tf.transform.translation.x, tf.transform.translation.y,
+                                       yaw(tf.transform.rotation)};
+      if (!map_frame_.empty() && map_frame_ != white->header.frame_id) tracker_->reset();
+      map_frame_ = white->header.frame_id;
+      res = tracker_->update(toPoints(*white, robot, generator_params_.max_range, max_lateral_range_),
+                             toPoints(*yellow, robot, generator_params_.max_range, max_lateral_range_),
+                             robot, rclcpp::Time(header.stamp).seconds(), selected_lane_);
     } catch (const std::exception& e) {
-      RCLCPP_ERROR_THROTTLE(get_logger(), *get_clock(), 2000, "Centerline generation failed: %s", e.what());
+      RCLCPP_ERROR_THROTTLE(get_logger(), *get_clock(), 2000, "Map centerline generation failed: %s", e.what());
     }
-
-    // Always publish both (empty when a side is missing), like the Python node did.
-    left_pub_->publish(toPathMsg(res.left, white->header));
-    right_pub_->publish(toPathMsg(res.right, white->header));
+    // TF or malformed map failures publish empty paths.
+    left_pub_->publish(toPathMsg(res.left, header));
+    right_pub_->publish(toPathMsg(res.right, header));
 
     if (timing_log_period_ > 0) {
       const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
@@ -195,10 +208,19 @@ class CenterlineNode : public rclcpp::Node {
     }
   }
 
-  std::unique_ptr<centerline::CenterlineGenerator> gen_;
-  rclcpp::Subscription<PointCloud2>::SharedPtr white_sub_, yellow_sub_;
+  centerline::Params generator_params_;
+  std::unique_ptr<centerline::RoadTracker> tracker_;
+  rclcpp::Subscription<std_msgs::msg::Int32>::SharedPtr lane_sub_;
+  std::string map_frame_;
+  int selected_lane_ = 2;
+  message_filters::Subscriber<Grid> white_sub_, yellow_sub_;
+  std::shared_ptr<message_filters::Synchronizer<SyncPolicy>> sync_;
+  std::unique_ptr<tf2_ros::Buffer> tf_buffer_;
+  std::unique_ptr<tf2_ros::TransformListener> tf_listener_;
+  std::string base_frame_;
+  double max_lateral_range_;
+  double max_map_tf_skew_;
   rclcpp::Publisher<Path>::SharedPtr left_pub_, right_pub_;
-  PointCloud2::ConstSharedPtr white_, yellow_;
 
   int timing_log_period_ = 0;
   int frames_ = 0;

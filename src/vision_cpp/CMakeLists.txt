@@ -56,7 +56,6 @@ add_library(vision_core STATIC
   src/gpu_pipeline.cpp
   src/trt_engine.cpp
   src/model_helpers.cpp
-  src/thinning.cpp
   src/ipm.cpp)
 
 

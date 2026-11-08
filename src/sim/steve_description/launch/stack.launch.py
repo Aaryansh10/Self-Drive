@@ -99,6 +99,14 @@ def generate_launch_description():
         }]
     )
 
+    map_skeleton_node = Node(
+        package='mapping_cpp',
+        executable='map_skeleton_node',
+        name='map_skeleton_node',
+        output='screen',
+        parameters=[{'use_sim_time': use_sim_time}]
+    )
+
     intersection_node = Node(
         package='intersection_cpp',
         executable='intersection_server',
@@ -182,6 +190,7 @@ def generate_launch_description():
         centerline_node,
         path_mux_node,
         mapping_node,
+        map_skeleton_node,
         controller_server_node,
         lifecycle_manager_node,
         velocity_smoother_node,
