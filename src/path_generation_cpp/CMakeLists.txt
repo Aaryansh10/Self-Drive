@@ -19,7 +19,7 @@ find_package(geometry_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
 
 # ROS-free algorithm library
-add_library(centerline_generator STATIC src/centerline_generator.cpp)
+add_library(centerline_generator STATIC src/centerline_generator.cpp src/road_tracker.cpp)
 target_include_directories(centerline_generator PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>)
 
@@ -39,6 +39,9 @@ if(BUILD_TESTING)
   add_executable(test_skeleton_map test/test_skeleton_map.cpp)
   target_link_libraries(test_skeleton_map centerline_generator)
   add_test(NAME skeleton_map COMMAND test_skeleton_map)
+  add_executable(test_road_tracker test/test_road_tracker.cpp)
+  target_link_libraries(test_road_tracker centerline_generator)
+  add_test(NAME road_tracker COMMAND test_road_tracker)
 endif()
 
 ament_package()

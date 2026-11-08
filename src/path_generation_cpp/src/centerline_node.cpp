@@ -20,6 +20,8 @@
 #include <tf2_ros/buffer.h>
 #include <tf2_ros/transform_listener.h>
 #include "path_generation_cpp/skeleton_map.hpp"
+#include "path_generation_cpp/road_tracker.hpp"
+#include "std_msgs/msg/int32.hpp"
 
 #include "path_generation_cpp/centerline_generator.hpp"
 
@@ -69,10 +71,33 @@ class CenterlineNode : public rclcpp::Node {
     const auto right_topic = declare_parameter<std::string>("right_centerline_topic", "/path/right_centerline");
     timing_log_period_ = static_cast<int>(declare_parameter<int64_t>("timing_log_period", 0));
 
-    gen_ = std::make_unique<centerline::CenterlineGenerator>(declareGeneratorParams());
+    generator_params_ = declareGeneratorParams();
+    centerline::RoadTrackerParams tracker_params;
+    tracker_params.boundary_tolerance = declare_parameter<double>("road_boundary_tolerance", tracker_params.boundary_tolerance);
+    tracker_params.tolerance_per_m = declare_parameter<double>("road_tolerance_per_m", tracker_params.tolerance_per_m);
+    tracker_params.min_forward_span = declare_parameter<double>("road_min_forward_span", tracker_params.min_forward_span);
+    tracker_params.min_forward_alignment = declare_parameter<double>("road_min_forward_alignment", tracker_params.min_forward_alignment);
+    tracker_params.max_branch_heading_error = declare_parameter<double>("road_max_branch_heading_error", tracker_params.max_branch_heading_error);
+    tracker_params.reference_timeout = declare_parameter<double>("road_reference_timeout", tracker_params.reference_timeout);
+    tracker_params.reference_max_distance = declare_parameter<double>("road_reference_max_distance", tracker_params.reference_max_distance);
+    tracker_params.reference_max_heading_change = declare_parameter<double>("road_reference_max_heading_change", tracker_params.reference_max_heading_change);
+    tracker_params.fallback_timeout = declare_parameter<double>("path_fallback_timeout", tracker_params.fallback_timeout);
+    tracker_params.fallback_max_distance = declare_parameter<double>("path_fallback_max_distance", tracker_params.fallback_max_distance);
+    tracker_params.fallback_max_heading_change = declare_parameter<double>("path_fallback_max_heading_change", tracker_params.fallback_max_heading_change);
+    tracker_params.fallback_max_anchor_distance = declare_parameter<double>("path_fallback_max_anchor_distance", tracker_params.fallback_max_anchor_distance);
+    tracker_ = std::make_unique<centerline::RoadTracker>(generator_params_, tracker_params);
+    const auto initial_lane = declare_parameter<std::string>("initial_lane", "left");
+    if (initial_lane != "left" && initial_lane != "right") throw std::invalid_argument("initial_lane must be left or right");
+    selected_lane_ = initial_lane == "left" ? 2 : 1;
+    const auto selected_topic = declare_parameter<std::string>("selected_lane_topic", "/lane_change/selected_lane");
+    lane_sub_ = create_subscription<std_msgs::msg::Int32>(selected_topic, rclcpp::QoS(1).reliable().transient_local(),
+        [this](const std_msgs::msg::Int32& msg) { if (msg.data == 1 || msg.data == 2) selected_lane_ = msg.data; });
 
     base_frame_ = declare_parameter<std::string>("base_frame", "link_base");
     max_lateral_range_ = declare_parameter<double>("max_lateral_range", 12.0);
+    max_map_tf_skew_ = declare_parameter<double>("max_map_tf_skew", 1.0);
+    if (max_map_tf_skew_ <= 0 || !std::isfinite(max_map_tf_skew_))
+      throw std::invalid_argument("max_map_tf_skew must be positive and finite");
     if (max_lateral_range_ <= 0) throw std::invalid_argument("max_lateral_range must be positive");
     tf_buffer_ = std::make_unique<tf2_ros::Buffer>(get_clock());
     tf_listener_ = std::make_unique<tf2_ros::TransformListener>(*tf_buffer_);
@@ -143,21 +168,30 @@ class CenterlineNode : public rclcpp::Node {
     try {
       if (white->header.frame_id.empty() || white->header.frame_id != yellow->header.frame_id)
         throw std::runtime_error("Skeleton maps must share a nonempty frame");
-      // The mapper already waited for this acquisition-time TF. Do not fall back
-      // to a newer robot pose while retaining the older stamp on the paths.
+      // A rolling map is already in the odom frame: use the latest robot pose
+      // to plan from where the robot is now. A transient-local map can predate
+      // this node's TF buffer, so its acquisition-time TF may no longer exist.
       const auto tf = tf_buffer_->lookupTransform(white->header.frame_id, base_frame_,
-          tf2_ros::fromMsg(white->header.stamp), tf2::durationFromSec(0.1));
+          tf2::TimePointZero, tf2::durationFromSec(0.1));
+      const rclcpp::Time tf_stamp(tf.header.stamp);
+      const rclcpp::Time map_stamp(white->header.stamp);
+      if (tf_stamp.nanoseconds() != 0) {
+        const double skew = (tf_stamp - map_stamp).seconds();
+        if (std::abs(skew) > max_map_tf_skew_)
+          throw std::runtime_error("Latest TF and lane map timestamps differ by " + std::to_string(skew) + " s");
+        header.stamp = tf.header.stamp;
+      }
       const centerline::RobotPose robot{tf.transform.translation.x, tf.transform.translation.y,
                                        yaw(tf.transform.rotation)};
-      // Persistence now lives in odom-frame maps. Blending old robot-frame paths
-      // would smear them as the vehicle moves, so only spatial smoothing is retained.
-      gen_->resetMemory();
-      res = gen_->generate(toPoints(*white, robot, gen_->params().max_range, max_lateral_range_),
-                           toPoints(*yellow, robot, gen_->params().max_range, max_lateral_range_));
+      if (!map_frame_.empty() && map_frame_ != white->header.frame_id) tracker_->reset();
+      map_frame_ = white->header.frame_id;
+      res = tracker_->update(toPoints(*white, robot, generator_params_.max_range, max_lateral_range_),
+                             toPoints(*yellow, robot, generator_params_.max_range, max_lateral_range_),
+                             robot, rclcpp::Time(header.stamp).seconds(), selected_lane_);
     } catch (const std::exception& e) {
       RCLCPP_ERROR_THROTTLE(get_logger(), *get_clock(), 2000, "Map centerline generation failed: %s", e.what());
     }
-    // Empty maps or unavailable TF clear both outputs instead of reusing an old path.
+    // TF or malformed map failures publish empty paths.
     left_pub_->publish(toPathMsg(res.left, header));
     right_pub_->publish(toPathMsg(res.right, header));
 
@@ -174,13 +208,18 @@ class CenterlineNode : public rclcpp::Node {
     }
   }
 
-  std::unique_ptr<centerline::CenterlineGenerator> gen_;
+  centerline::Params generator_params_;
+  std::unique_ptr<centerline::RoadTracker> tracker_;
+  rclcpp::Subscription<std_msgs::msg::Int32>::SharedPtr lane_sub_;
+  std::string map_frame_;
+  int selected_lane_ = 2;
   message_filters::Subscriber<Grid> white_sub_, yellow_sub_;
   std::shared_ptr<message_filters::Synchronizer<SyncPolicy>> sync_;
   std::unique_ptr<tf2_ros::Buffer> tf_buffer_;
   std::unique_ptr<tf2_ros::TransformListener> tf_listener_;
   std::string base_frame_;
   double max_lateral_range_;
+  double max_map_tf_skew_;
   rclcpp::Publisher<Path>::SharedPtr left_pub_, right_pub_;
 
   int timing_log_period_ = 0;

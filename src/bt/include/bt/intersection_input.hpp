@@ -4,6 +4,7 @@
 #include <memory>
 #include <vector>
 #include "bt/shared_state.hpp"
+#include "bt/stop_line_geometry.hpp"
 #include "rclcpp/rclcpp.hpp"
 #include "sensor_msgs/msg/point_cloud2.hpp"
 #include "sensor_msgs/point_cloud2_iterator.hpp"
@@ -14,8 +15,8 @@
 #include "vision_interfaces/msg/detection_array.hpp"
 
 namespace bt {
-// For real AND fake signs, fusion already puts stop-line depth in distance.
-// Read that field unchanged; use the cloud only when there is no recent sign.
+// Validate a transverse stop-line cloud for every intersection decision.
+// A recent sign supplies distance; without one, use the validated cloud distance.
 class IntersectionInput {
 public:
     IntersectionInput(rclcpp::Node::SharedPtr node, std::shared_ptr<SharedState> state)
@@ -27,8 +28,13 @@ public:
         sign_ttl_ = node->get_parameter("stop_sign_ttl").as_double();
         min_score_ = node->get_parameter("min_score").as_double();
         real_threshold_ = node->declare_parameter<double>("sign_real_threshold", 0.5);
-        min_points_ = node->declare_parameter<int>("stop_line_min_points", 5);
+        min_points_ = node->declare_parameter<int>("stop_line_min_points", 10);
         half_width_ = node->declare_parameter<double>("stop_line_half_width", 1.2);
+        min_span_ = node->declare_parameter<double>("stop_line_min_span", 0.6);
+        line_tolerance_ = node->declare_parameter<double>("stop_line_line_tolerance", 0.15);
+        max_slope_ = node->declare_parameter<double>("stop_line_max_slope", 0.5);
+        max_gap_ = node->declare_parameter<double>("stop_line_max_gap", 0.35);
+        sign_distance_tolerance_ = node->declare_parameter<double>("stop_line_sign_distance_tolerance", 1.5);
         const auto line_topic = node->declare_parameter<std::string>("stop_line_topic", "/pc_stopline");
         sign_class_ = node->declare_parameter<std::string>("stop_sign_class", "sign");
         const auto sign_topic = node->declare_parameter<std::string>("sign_detections_topic", "/detections_depth");
@@ -109,53 +115,72 @@ private:
         }
         if (!saw_sign) return;
         sign_input_stamp_ = stamp;
-        std::vector<Detection> dets;
-        // A current sign observation is authoritative. Never substitute a raw
-        // cloud distance, even when this detection's depth is invalid.
+        sign_valid_ = nearest != nullptr;
         if (nearest) {
+            sign_distance_ = nearest->distance;
+            sign_points_ = static_cast<int>(nearest->n_pts);
+            sign_header_ = msg.header;
             real_sign_stamp_ = -1e9;
-            const auto& d = *nearest;
-            if (d.is_stop_sign && std::isfinite(d.sign_real_prob) &&
-                d.sign_real_prob >= real_threshold_ && d.sign_real_prob <= 1.0)
+            if (nearest->is_stop_sign && std::isfinite(nearest->sign_real_prob) &&
+                nearest->sign_real_prob >= real_threshold_ && nearest->sign_real_prob <= 1.0)
                 real_sign_stamp_ = stamp;
-            try {
-                dets.push_back(line_detection(d.distance, static_cast<int>(d.n_pts), msg.header));
-                add_real_sign(dets);
-            } catch (const std::exception& ex) {
-                RCLCPP_WARN_THROTTLE(node_->get_logger(), *node_->get_clock(), 2000,
-                                    "Sign stop-line input unavailable: %s", ex.what());
+        }
+        // Decisions advance once per cloud observation, not once per message
+        // from both topics, so confirmation requires independent cloud frames.
+    }
+
+    void update_decision() {
+        std::vector<Detection> dets;
+        // Every intersection trigger, including one with sign-provided depth,
+        // requires a recent geometrically valid stop line from the point cloud.
+        if (line_valid_ && fresh(line_stamp_)) {
+            const bool has_sign = fresh(sign_input_stamp_);
+            if (!has_sign || (sign_valid_ && std::abs(sign_input_stamp_ - line_stamp_) <= max_age_ &&
+                              std::abs(sign_distance_ - line_distance_) <= sign_distance_tolerance_)) {
+                try {
+                    dets.push_back(has_sign ? line_detection(sign_distance_, sign_points_, sign_header_)
+                                            : line_detection(line_distance_, line_points_, line_header_));
+                    add_real_sign(dets);
+                } catch (const std::exception& ex) {
+                    RCLCPP_WARN_THROTTLE(node_->get_logger(), *node_->get_clock(), 2000,
+                                        "Stop-line input unavailable: %s", ex.what());
+                }
             }
         }
-        state_->on_intersection_detections(dets, nearest != nullptr);
+        state_->on_intersection_detections(dets, fresh(sign_input_stamp_) && sign_valid_);
     }
 
     void on_line(const sensor_msgs::msg::PointCloud2& msg) {
-        std::vector<Detection> dets;
-        if (!fresh(rclcpp::Time(msg.header.stamp).seconds()) || fresh(sign_input_stamp_)) return;
+        const double stamp = rclcpp::Time(msg.header.stamp).seconds();
+        if (!fresh(stamp)) return;
+        line_stamp_ = stamp;
+        line_valid_ = false;
         try {
             sensor_msgs::msg::PointCloud2 cloud;
             if (msg.header.frame_id == base_) cloud = msg;
             else tf2::doTransform(msg, cloud, buffer_.lookupTransform(
                 base_, msg.header.frame_id, rclcpp::Time(msg.header.stamp), rclcpp::Duration::from_seconds(0.05)));
-            std::vector<float> forward;
-            sensor_msgs::PointCloud2ConstIterator<float> x(cloud, "x"), y(cloud, "y"), z(cloud, "z");
-            for (; x != x.end(); ++x, ++y, ++z) {
-                if (std::isfinite(*x) && std::isfinite(*y) && std::isfinite(*z) &&
-                    *x >= 0.0f && std::abs(*y) <= half_width_) forward.push_back(*x);
+            std::vector<StopLinePoint> points;
+            if (!cloud.data.empty()) {
+                sensor_msgs::PointCloud2ConstIterator<float> x(cloud, "x"), y(cloud, "y"), z(cloud, "z");
+                for (; x != x.end(); ++x, ++y, ++z) {
+                    if (std::isfinite(*x) && std::isfinite(*y) && std::isfinite(*z) &&
+                        *x >= 0.0f && std::abs(*y) <= half_width_) points.push_back({*x, *y});
+                }
             }
-            if (forward.size() >= static_cast<size_t>(std::max(1, min_points_))) {
-                const size_t edge = forward.size() / 10;
-                std::nth_element(forward.begin(), forward.begin() + edge, forward.end());
-                auto header = msg.header;
-                header.frame_id = base_;
-                dets.push_back(line_detection(forward[edge], static_cast<int>(forward.size()), header));
-                add_real_sign(dets);
+            const auto line = find_stop_line(points, min_points_, min_span_, line_tolerance_, max_slope_, max_gap_);
+            if (line.valid) {
+                line_valid_ = true;
+                line_distance_ = line.distance;
+                line_points_ = line.points;
+                line_header_ = msg.header;
+                line_header_.frame_id = base_;
             }
         } catch (const std::exception& ex) {
             RCLCPP_WARN_THROTTLE(node_->get_logger(), *node_->get_clock(), 2000,
                                 "Stop-line input unavailable: %s", ex.what());
         }
-        state_->on_intersection_detections(dets);
+        update_decision();
     }
 
     rclcpp::Node::SharedPtr node_;
@@ -164,6 +189,11 @@ private:
     tf2_ros::TransformListener listener_;
     std::string base_, odom_, sign_class_;
     double max_age_, tf_tolerance_, sign_ttl_, min_score_, real_threshold_, half_width_;
+    double min_span_, line_tolerance_, max_slope_, max_gap_, sign_distance_tolerance_;
+    double line_stamp_ = -1e9, line_distance_ = 0, sign_distance_ = 0;
+    int line_points_ = 0, sign_points_ = 0;
+    bool line_valid_ = false, sign_valid_ = false;
+    std_msgs::msg::Header line_header_, sign_header_;
     int min_points_;
     double real_sign_stamp_ = -1e9, sign_input_stamp_ = -1e9;
     rclcpp::Subscription<vision_interfaces::msg::DetectionArray>::SharedPtr signs_;

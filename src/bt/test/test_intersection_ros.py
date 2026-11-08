@@ -170,6 +170,30 @@ def main():
         node.destroy_subscription(depth_sub)
         print('PASS: fusion uses stop-line distance for real and fake sign detections')
 
+        # A sign or many points alone are insufficient: the cloud must contain
+        # a substantial transverse line, associated with the sign's depth.
+        before = len(intersection_goals)
+        bt = start('build/bt/bt_executor', bt_args, 'intersection_bad_geometry')
+        wait_for(lambda: line_pub.get_subscription_count() > 0 and sign_pub.get_subscription_count() > 0)
+        time.sleep(0.3)
+        for _ in range(8):
+            publish_inputs(0.0, candidate=False, distance=None, sign_distance=2.5)
+        assert len(intersection_goals) == before, 'Sign alone triggered an intersection'
+        for _ in range(8):
+            header = Header(stamp=node.get_clock().now().to_msg(), frame_id='link_base')
+            msg = DetectionArray(header=header)
+            msg.detections.append(Detection2D(class_name='sign', score=1.0, depth_valid=True,
+                                              n_pts=20, distance=2.5))
+            sign_pub.publish(msg)
+            time.sleep(.03)
+            line_pub.publish(create_cloud_xyz32(header, [(1. + i*.1, .01, 0.) for i in range(40)]))
+            time.sleep(.08)
+        assert len(intersection_goals) == before, 'Longitudinal cloud triggered an intersection'
+        stop(bt)
+        processes.remove(bt)
+        time.sleep(0.3)
+        print('PASS: sign-only and longitudinal cloud false positives rejected')
+
         # Fake and unclassified signs use detection.distance without a stop action.
         for probability, candidate in [(0.01, True), (0.0, False), (None, False)]:
             finish_intersection.clear()
@@ -184,11 +208,10 @@ def main():
                 assert len(intersection_goals) == before, 'Cloud overrode the sign distance'
                 assert gate_values[-1] is True
             for _ in range(8):
-                # Sign detections must trigger without ANY cloud reaching the BT.
-                publish_inputs(probability, candidate,
-                               distance=0.5 if probability is None else None, sign_distance=0.5)
+                # Both sign depth and a matching transverse cloud are required.
+                publish_inputs(probability, candidate, distance=0.5, sign_distance=0.5)
             wait_for(lambda: len(intersection_goals) == before + 1)
-            assert intersection_goals[-1].turn_direction == Intersection.Goal.TURN_LEFT
+            assert intersection_goals[-1].turn_direction == Intersection.Goal.TURN_STRAIGHT
             assert abs(intersection_goals[-1].road_width - 7.4) < 0.001
             finish_intersection.set()
             wait_for(lambda: gate_values and gate_values[-1])
@@ -213,7 +236,7 @@ def main():
             assert gate_values[-1] is True
             assert len(intersection_goals) == before
         for _ in range(10):
-            publish_inputs(0.99, distance=None, sign_distance=2.75)
+            publish_inputs(0.99, distance=2.75, sign_distance=2.75)
         time.sleep(0.4)
         assert len(intersection_goals) == before
         assert gate_values[-1] is False
@@ -245,6 +268,9 @@ def main():
             msg.detections.append(Detection2D(class_name='sign', score=1.0, is_stop_sign=False,
                                               sign_real_prob=0.0, depth_valid=True, n_pts=11, distance=2.25))
             sign_pub.publish(msg)
+            time.sleep(0.04)
+            line_pub.publish(create_cloud_xyz32(Header(stamp=stamp.to_msg(), frame_id='link_base'),
+                                                [(2.25, y / 10, 0.0) for y in range(-5, 6)]))
             if skew < 0.1:
                 wait_for(lambda: len(intersection_goals) == before + 1)
                 assert 'stopline at 2.25 m' in Path('/tmp/' + name + '.log').read_text()
@@ -273,7 +299,7 @@ def main():
         wait_for(lambda: 'bt running:' in Path('/tmp/intersection_delayed_startup.log').read_text())
         assert "'intersection_delayed' is not reachable" not in Path('/tmp/intersection_delayed_startup.log').read_text()
         for _ in range(5):
-            publish_inputs(0.0, candidate=False, distance=None, sign_distance=2.5)
+            publish_inputs(0.0, candidate=False, distance=2.5, sign_distance=2.5)
         wait_for(lambda: len(intersection_goals) == before + 1)
         finish_intersection.set()
         wait_for(lambda: gate_values and gate_values[-1])

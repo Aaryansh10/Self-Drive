@@ -20,6 +20,7 @@ struct Point2 {
   double x{0.0};
   double y{0.0};
   int segment = 0;  // explicit map branch identity; legacy ordered inputs use 0
+  int boundary_side = 0;  // -1 right, +1 left, 0 infer for legacy inputs
 };
 
 // An empty Path means "no centerline for this side" (Python returned None).

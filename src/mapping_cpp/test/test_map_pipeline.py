@@ -101,9 +101,17 @@ def main():
         empty.data = [0] * (empty.info.width * empty.info.height)
         for pub in clear_pubs:
             pub.publish(empty)
+        spin_until(lambda: all(latest[t].header.stamp == empty.header.stamp and latest[t].poses
+                               for t in topics[-2:]))
+        # The last observed path is only held briefly; repeated empty maps cannot
+        # refresh the fallback indefinitely.
+        time.sleep(2.1)
+        empty.header.stamp = node.get_clock().now().to_msg()
+        for pub in clear_pubs:
+            pub.publish(empty)
         spin_until(lambda: all(latest[t].header.stamp == empty.header.stamp and not latest[t].poses
                                for t in topics[-2:]))
-        print('ROS map pipeline passed: separate maps, thinning, rotated TF, both paths, empty-map clearing')
+        print('ROS map pipeline passed: separate maps, thinning, rotated TF, gap recovery and expiry')
     finally:
         for process in processes:
             if process.poll() is None:

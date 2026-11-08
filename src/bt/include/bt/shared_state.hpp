@@ -23,7 +23,7 @@ public:
         obstacle_ = obstacles_.update(dets, obstacle_time_);
     }
 
-    // Called once per sign-depth detection list, or per cloud when no sign is present.
+    // Called once per stop-line cloud after geometric validation.
     void on_intersection_detections(const std::vector<Detection>& dets, bool reset_stop_sign = false) {
         std::lock_guard<std::mutex> lock(m_);
         if (reset_stop_sign) intersections_.clear_stop_sign();
