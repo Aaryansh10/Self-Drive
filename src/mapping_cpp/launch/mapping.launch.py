@@ -28,6 +28,7 @@ def generate_launch_description():
         name='controller_server',
         remappings=[('cmd_vel', '/cmd_vel_nav')],
         output='screen',
+        remappings=[('cmd_vel', 'cmd_vel_nav')],
         parameters=[nav2_params_file, {'use_sim_time': use_sim_time}]
     )
 
@@ -45,6 +46,7 @@ def generate_launch_description():
         name='velocity_smoother',
         remappings=[('cmd_vel', '/cmd_vel_nav'), ('cmd_vel_smoothed', '/cmd_vel_drive')],
         output='screen',
+        remappings=[('cmd_vel', 'cmd_vel_nav'), ('cmd_vel_smoothed', 'cmd_vel')],
         parameters=[nav2_params_file, {'use_sim_time': use_sim_time}],
     )
 

@@ -47,8 +47,17 @@ The mapper retains its ROI, Gaussian splat, log-odds, speckle, and TF wait param
 ```bash
 colcon build --packages-select vision_cpp path_generation_cpp mapping_cpp --cmake-args -DBUILD_TESTING=ON
 source install/setup.bash
+# Terminal 1: start Gazebo and the course
+ros2 launch self_drive_course self_drive_course.launch.py
+# Terminal 2: spawn the robot and publish its state/odom TF
+ros2 launch steve_description robot_gazebo.launch.py
+# Terminal 3: perception, planning, behavior tree and controller
 ros2 launch steve_description stack.launch.py
 ```
+
+`stack.launch.py` starts the perception and control pipeline; it does not start Gazebo or spawn the robot. The controller publishes `/cmd_vel_nav`, and the velocity smoother publishes the final `/cmd_vel` consumed by the simulated robot. The behavior tree node is named `bt` to match `bt.yaml`.
+
+If the robot remains stationary, check `/clock`, the camera and `/pc_whitelane`/`/pc_yellowlane`, `/lane_map/white_skeleton`, `/path/left_centerline`, `/path/right_centerline`, `/path/selected_centerline`, `/lane_follow/enable`, the `/follow_path` action, `/cmd_vel_nav` and `/cmd_vel`. A published path with `poses: []` does not provide a goal. The selected lane comes from `/lane_change/selected_lane` (`1` right, `2` left). Controller logs reporting collision ahead mean that Nav2 is refusing to drive along the supplied path; inspect the local costmap and obstacles before changing collision settings.
 
 `stack.launch.py` starts the full pipeline. For a standalone mapping/navigation setup, `ros2 launch mapping_cpp mapping.launch.py` starts mapping, skeletonization, centerlines, and the existing Nav2 nodes; supply vision/clouds and TF separately. Use one launch entrypoint at a time to avoid duplicate map and path publishers.
 
